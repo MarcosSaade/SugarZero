@@ -1,3 +1,6 @@
+# constants.py
+import numpy as np
+
 # Game constants
 FPS = 60
 WIDTH, HEIGHT = (600, 700)  # Increased height for status bar
@@ -25,8 +28,8 @@ SIMULATION_COUNTS = {
     "Hard": 250
 }
 
-# Initial board setup
-INITIAL_BOARD = [
+# Initial board setup as a numpy array (9 squares × stack height 6)
+INITIAL_BOARD = np.array([
     # Opponent's pieces (top row - squares 0, 1, 2)
     [0, 0, -1, -1, -1, -1],  # Two red pieces in square 0
     [0, 0, -1, -1, -1, -1],  # Two red pieces in square 1
@@ -41,7 +44,7 @@ INITIAL_BOARD = [
     [1, 1, -1, -1, -1, -1],  # Two blue pieces in square 6
     [1, 1, -1, -1, -1, -1],  # Two blue pieces in square 7
     [1, 1, -1, -1, -1, -1],  # Two blue pieces in square 8
-]
+], dtype=int)
 
 # Square adjacency mapping
 ADJACENT_SQUARES = {
