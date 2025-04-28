@@ -1,3 +1,5 @@
+# train.py
+
 import argparse
 import os
 import torch
@@ -13,13 +15,14 @@ from game_state import GameState
 from utils import encode_board
 
 # Hyperparameters
-NUM_SELF_PLAY_GAMES    = 1000
-MCTS_SIMULATIONS       = 100
-BATCH_SIZE             = 64
-REPLAY_BUFFER_CAPACITY = 10000
-LEARNING_RATE          = 1e-3
-CHECKPOINT_INTERVAL    = 100  # games between automatic saves
-DEVICE                 = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+NUM_SELF_PLAY_GAMES      = 1000
+MCTS_SIMULATIONS         = 100
+BATCH_SIZE               = 64
+REPLAY_BUFFER_CAPACITY   = 10000
+LEARNING_RATE            = 1e-3
+CHECKPOINT_INTERVAL      = 100  # games between automatic saves
+EPISODES_PER_TRAIN_BATCH = 10   # run this many self-play games before training
+DEVICE                   = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 def self_play_episode(policy_model, value_model, replay_buffer):
@@ -115,19 +118,25 @@ def main():
 
     replay_buffer = ReplayBuffer(REPLAY_BUFFER_CAPACITY)
 
-    for game_idx in range(args.start_game, NUM_SELF_PLAY_GAMES + 1):
-        self_play_episode(policy_model, value_model, replay_buffer)
-        loss = train_step(policy_model, value_model, optimizer, replay_buffer)
-        if loss is not None:
-            print(f"Game {game_idx}/{NUM_SELF_PLAY_GAMES}, Loss: {loss:.4f}, Buffer: {len(replay_buffer)}")
+    current_game = args.start_game
+    while current_game <= NUM_SELF_PLAY_GAMES:
+        # Self-play batch
+        batch_end = min(current_game + EPISODES_PER_TRAIN_BATCH - 1, NUM_SELF_PLAY_GAMES)
+        for idx in range(current_game, batch_end + 1):
+            self_play_episode(policy_model, value_model, replay_buffer)
 
-        # Automatic periodic checkpoint
-        if game_idx % CHECKPOINT_INTERVAL == 0:
-            save_checkpoint(policy_model, value_model, game_idx, output_dir=args.output_dir)
+        # Training batch
+        for idx in range(current_game, batch_end + 1):
+            loss = train_step(policy_model, value_model, optimizer, replay_buffer)
+            if loss is not None:
+                print(f"Game {idx}/{NUM_SELF_PLAY_GAMES}, "
+                      f"Loss: {loss:.4f}, Buffer: {len(replay_buffer)}")
 
-    # Final save
-    save_checkpoint(policy_model, value_model, NUM_SELF_PLAY_GAMES, output_dir=args.output_dir)
+        # Checkpoint at batch end
+        if batch_end % CHECKPOINT_INTERVAL == 0 or batch_end == NUM_SELF_PLAY_GAMES:
+            save_checkpoint(policy_model, value_model, batch_end, output_dir=args.output_dir)
 
+        current_game = batch_end + 1
 
 if __name__ == "__main__":
     main()
