@@ -8,7 +8,7 @@ import sys
 # Import all test modules
 from test_utils import TestUtils
 from test_game_state import TestGameState
-from test_mcts import TestMCTS
+from test_mcts import TestPUCT
 from test_integration import TestIntegration
 
 def run_tests():
@@ -18,7 +18,7 @@ def run_tests():
     # Add test cases
     test_suite.addTest(unittest.makeSuite(TestUtils))
     test_suite.addTest(unittest.makeSuite(TestGameState))
-    test_suite.addTest(unittest.makeSuite(TestMCTS))
+    test_suite.addTest(unittest.makeSuite(TestPUCT))
     test_suite.addTest(unittest.makeSuite(TestIntegration))
     
     # Run the tests

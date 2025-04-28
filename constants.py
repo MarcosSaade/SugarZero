@@ -23,9 +23,9 @@ EXPLORATION_WEIGHT = 1.4  # UCB1 exploration parameter
 
 # AI difficulty settings
 SIMULATION_COUNTS = {
-    "Easy": 50,
-    "Medium": 100,
-    "Hard": 250
+    "Easy": 500,
+    "Medium": 1000,
+    "Hard": 5000
 }
 
 # Initial board setup as a numpy array (9 squares × stack height 6)

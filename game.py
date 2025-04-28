@@ -1,26 +1,39 @@
 # game.py
+
 import pygame
 import sys
 import threading
 from queue import Queue
 from typing import Tuple
 import numpy as np
+import torch
 
 from constants import (
     FPS, WIDTH, HEIGHT, TILE_SIZE, STATUS_BAR_HEIGHT,
     GRAY_1, GRAY_2, BLACK, WHITE, STATUS_BAR_COLOR,
-    RED_COLORS, BLUE_COLORS, SIMULATION_COUNTS, INITIAL_BOARD
+    RED_COLORS, BLUE_COLORS, SIMULATION_COUNTS, EXPLORATION_WEIGHT, INITIAL_BOARD
 )
 from utils import get_top_piece, get_top_empty, is_forward_move
 from game_state import GameState
-from mcts import mcts_search
+from policy_net import PolicyNet
+from value_net import ValueNet
+from mcts import puct_search
 
 class Game:
-    def __init__(self, ai_enabled=True):
+    def __init__(self, ai_enabled=True, device: str = 'cpu'):
         pygame.init()
         self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
         pygame.display.set_caption("SugarZero")
         self.clock = pygame.time.Clock()
+
+        # Device for torch
+        self.device = device
+
+        # Instantiate neural nets
+        self.policy_model = PolicyNet().to(self.device)
+        self.value_model  = ValueNet().to(self.device)
+        self.policy_model.eval()
+        self.value_model.eval()
 
         # Initialize the board as a NumPy array copy
         self.board = INITIAL_BOARD.copy()
@@ -166,8 +179,16 @@ class Game:
 
     def mcts_search_thread(self, result_queue):
         state = self.create_game_state()
-        sims = SIMULATION_COUNTS[self.ai_difficulty]
-        result_queue.put(mcts_search(state, self.ai_player, sims))
+        sims  = SIMULATION_COUNTS[self.ai_difficulty]
+        move = puct_search(
+            state,
+            sims,
+            policy_model=self.policy_model,
+            value_model=self.value_model,
+            cpuct=EXPLORATION_WEIGHT,
+            device=self.device
+        )
+        result_queue.put(move)
 
     def ai_turn(self):
         if self.turn == self.ai_player and self.ai_enabled and not self.game_over:
@@ -190,9 +211,9 @@ class Game:
     def handle_keypress(self, key):
         if key == pygame.K_r:
             self.ai_thinking = False
-            while not self.ai_result_queue.empty():
+            while not self.ai_RESULT_queue.empty():
                 self.ai_result_queue.get()
-            self.__init__(ai_enabled=self.ai_enabled)
+            self.__init__(ai_enabled=self.ai_enabled, device=self.device)
         elif key == pygame.K_q:
             return False
         elif key == pygame.K_a:

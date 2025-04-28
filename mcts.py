@@ -2,78 +2,123 @@
 
 import math
 import random
+import torch
+
 from constants import EXPLORATION_WEIGHT
 from game_state import GameState
-from typing import List, Tuple
+from utils import encode_board, move_to_index
 
-class MCTSNode:
-    def __init__(self, game_state: GameState, parent=None, move=None):
+
+class PUCTNode:
+    def __init__(
+        self,
+        game_state: GameState,
+        parent=None,
+        move=None,
+        prior: float = 1.0,
+        policy_model=None,
+        device: str = 'cpu'
+    ):
         self.game_state    = game_state
         self.parent        = parent
         self.move          = move
-        self.children      = []
-        self.wins          = 0
-        self.visits        = 0
+        self.prior         = prior
+        self.W             = 0.0
+        self.N             = 0
+        self.children      = {}               # move → PUCTNode
         self.untried_moves = game_state.get_valid_moves()
+        self.policy_model  = policy_model
+        self.device        = device
+        self._init_priors()
 
-    def add_child(self, move: Tuple[int, int]) -> 'MCTSNode':
+    def _init_priors(self):
+        if not self.untried_moves:
+            self.priors = {}
+            return
+
+        tensor, turn = encode_board(self.game_state.board, self.game_state.turn)
+        b = torch.from_numpy(tensor).unsqueeze(0).to(self.device)
+        t = torch.tensor([turn], dtype=torch.float32, device=self.device)
+        with torch.no_grad():
+            probs = self.policy_model(b, t).squeeze(0).cpu().numpy()
+
+        self.priors = {
+            move: float(probs[move_to_index(move)])
+            for move in self.untried_moves
+        }
+
+    def select_child(self, cpuct: float):
+        total_N = sum(child.N for child in self.children.values()) or 1
+
+        def score(child: 'PUCTNode'):
+            Q = child.W / child.N if child.N > 0 else 0.0
+            U = cpuct * child.prior * math.sqrt(total_N) / (1 + child.N)
+            return Q + U
+
+        return max(self.children.values(), key=score)
+
+    def expand(self, move: tuple[int,int]) -> 'PUCTNode':
+        prior = self.priors.get(move, 0.0)
         child_state = self.game_state.clone()
-        child_state.make_move(move[0], move[1])
-        child = MCTSNode(child_state, parent=self, move=move)
+        child_state.make_move(*move)
+        child = PUCTNode(
+            child_state,
+            parent=self,
+            move=move,
+            prior=prior,
+            policy_model=self.policy_model,
+            device=self.device
+        )
         self.untried_moves.remove(move)
-        self.children.append(child)
+        self.children[move] = child
         return child
 
-    def select_child(self) -> 'MCTSNode':
-        return max(self.children, key=lambda c: c.ucb_value())
+def puct_search(
+    game_state: GameState,
+    sim_count: int,
+    policy_model,
+    value_model,
+    cpuct: float = EXPLORATION_WEIGHT,
+    device: str = 'cpu'
+) -> tuple[int,int]:
 
-    def ucb_value(self) -> float:
-        if self.visits == 0:
-            return float('inf')
-        exploitation = self.wins / self.visits
-        exploration = EXPLORATION_WEIGHT * math.sqrt(math.log(self.parent.visits) / self.visits)
-        return exploitation + exploration
-
-    def is_fully_expanded(self) -> bool:
-        return len(self.untried_moves) == 0
-
-    def is_terminal(self) -> bool:
-        return self.game_state.game_over
-
-def mcts_search(game_state: GameState, ai_player: int, sim_count: int) -> Tuple[int, int]:
-    root = MCTSNode(game_state.clone())
+    root = PUCTNode(game_state.clone(), policy_model=policy_model, device=device)
+    root_player = game_state.turn
 
     for _ in range(sim_count):
         node = root
-        # Phase 1: Selection
-        while node.is_fully_expanded() and not node.is_terminal():
-            node = node.select_child()
 
-        # Phase 2: Expansion
-        if not node.is_terminal() and node.untried_moves:
-            move = random.choice(node.untried_moves)
-            node = node.add_child(move)
+        # SELECTION
+        while not node.untried_moves and node.children:
+            node = node.select_child(cpuct)
 
-        # Phase 3: Simulation
-        sim_state = node.game_state.clone()
-        while not sim_state.game_over:
-            valid = sim_state.get_valid_moves()
-            if not valid:
-                break
-            mv = random.choice(valid)
-            sim_state.make_move(mv[0], mv[1])
+        # EXPANSION
+        if node.untried_moves:
+            mv = random.choice(node.untried_moves)
+            node = node.expand(mv)
 
-        # Phase 4: Backpropagation
-        winner = sim_state.winner
-        while node is not None:
-            node.visits += 1
-            if winner == ai_player:
-                node.wins += 1
-            node = node.parent
+        # EVALUATION
+        tensor, turn = encode_board(node.game_state.board, node.game_state.turn)
+        b = torch.from_numpy(tensor).unsqueeze(0).to(device)
+        t = torch.tensor([turn], dtype=torch.float32, device=device)
+        with torch.no_grad():
+            v = value_model(b, t).item()
 
-    # Choose the move from the most‐visited child
+        # BACKPROPAGATION
+        cur = node
+        while cur is not None:
+            cur.N += 1
+            if cur.game_state.turn == root_player:
+                cur.W += v
+            else:
+                cur.W += (1 - v)
+            cur = cur.parent
+
+    # SELECT BEST FROM ROOT
     if root.children:
-        best = max(root.children, key=lambda c: c.visits)
-        return best.move
-    valid = game_state.get_valid_moves()
-    return random.choice(valid) if valid else None
+        best_move = max(root.children.items(), key=lambda item: item[1].N)[0]
+    else:
+        valid = game_state.get_valid_moves()
+        best_move = random.choice(valid) if valid else None
+
+    return best_move

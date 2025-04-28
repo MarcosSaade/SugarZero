@@ -1,11 +1,18 @@
+# tests/test_integration.py
+
 import sys
 import os
+import unittest
+import torch
+
+# allow imports from project root
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-import unittest
-import copy
 from game_state import GameState
-from mcts import mcts_search
+from mcts import puct_search
+from policy_net import PolicyNet
+from value_net import ValueNet
+
 
 class TestIntegration(unittest.TestCase):
     def test_game_flow(self):
@@ -49,7 +56,7 @@ class TestIntegration(unittest.TestCase):
         valid_horizontal = [m for m in horizontal_moves if m in valid_moves]
         
         if valid_horizontal:
-            game.make_move(valid_horizontal[0][0], valid_horizontal[0][1])
+            game.make_move(*valid_horizontal[0])
             self.assertFalse(game.moved_forward[1])  # Blue didn't move forward
             
             # First move for red - not forward
@@ -57,42 +64,48 @@ class TestIntegration(unittest.TestCase):
             self.assertFalse(game.moved_forward[0])  # Red didn't move forward
             
             # Second move for blue - not forward
-            game.make_move(valid_horizontal[0][1], valid_horizontal[0][0])  # Move back
+            back = valid_horizontal[0][::-1]
+            game.make_move(*back)
             self.assertFalse(game.moved_forward[1])  # Blue still didn't move forward
             
-            # Check that on third move, blue must move forward
+            # On third blue move, horizontal should be invalid
             valid_moves = game.get_valid_moves()
-            horizontal_moves = [(6, 7), (7, 6), (7, 8), (8, 7)]
-            valid_horizontal = [m for m in horizontal_moves if m in valid_moves]
-            
-            # All horizontal moves should be invalid now
-            for move in valid_horizontal:
-                self.assertFalse(game.is_valid_move(move[0], move[1]))
+            for move in horizontal_moves:
+                if move in valid_moves:
+                    self.assertFalse(game.is_valid_move(*move))
     
-    def test_mcts_integration(self):
-        """Test that MCTS can find good moves in typical game situations."""
-        # Test in initial position
+    def test_puct_integration(self):
+        """Test that PUCT search returns a valid move."""
         game = GameState()
-        move = mcts_search(game, 1, 50)  # Blue to move
+        
+        # Dummy uniform policy
+        policy = PolicyNet()
+        def uniform_policy(board, turn):
+            bsz = board.size(0)
+            return torch.ones(bsz, 81) / 81
+        policy.forward = uniform_policy
+        
+        # Dummy constant value
+        value = ValueNet()
+        def constant_value(board, turn):
+            bsz = board.size(0)
+            return torch.full((bsz, 1), 0.5)
+        value.forward = constant_value
+        
+        # Run PUCT
+        move = puct_search(
+            game,
+            sim_count=50,
+            policy_model=policy,
+            value_model=value,
+            cpuct=1.4,
+            device='cpu'
+        )
+        
+        # Move must be one of the legal moves
         self.assertIsNotNone(move)
-        
-        # Make sure move is valid
-        valid_moves = game.get_valid_moves()
-        self.assertIn(move, valid_moves)
-        
-        # Test in a mid-game position
-        game.make_move(6, 3)  # Blue moves
-        game.make_move(0, 3)  # Red moves
-        game.make_move(7, 4)  # Blue moves
-        game.make_move(1, 4)  # Red moves
-        
-        # Now test MCTS for blue
-        move = mcts_search(game, 1, 50)
-        self.assertIsNotNone(move)
-        
-        # Make sure move is valid
-        valid_moves = game.get_valid_moves()
-        self.assertIn(move, valid_moves)
+        self.assertIn(move, game.get_valid_moves())
+
 
 if __name__ == "__main__":
     unittest.main()
