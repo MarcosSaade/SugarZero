@@ -8,6 +8,8 @@ from constants import EXPLORATION_WEIGHT
 from game_state import GameState
 from utils import encode_board, move_to_index
 
+# Number of leaf evaluations to batch together
+EVAL_BATCH_SIZE = 16
 
 class PUCTNode:
     def __init__(
@@ -32,7 +34,7 @@ class PUCTNode:
         self._init_priors()
 
     def _init_priors(self):
-        if not self.untried_moves:
+        if not self.untried_moves or self.policy_model is None:
             self.priors = {}
             return
 
@@ -57,7 +59,7 @@ class PUCTNode:
 
         return max(self.children.values(), key=score)
 
-    def expand(self, move: tuple[int,int]) -> 'PUCTNode':
+    def expand(self, move: tuple[int, int]) -> 'PUCTNode':
         prior = self.priors.get(move, 0.0)
         child_state = self.game_state.clone()
         child_state.make_move(*move)
@@ -73,6 +75,29 @@ class PUCTNode:
         self.children[move] = child
         return child
 
+def _evaluate_and_backprop(nodes, root_player, value_model, device):
+    # Batch evaluation of leaf nodes
+    tensors = []
+    turns = []
+    for node in nodes:
+        tensor, turn = encode_board(node.game_state.board, node.game_state.turn)
+        tensors.append(torch.from_numpy(tensor).unsqueeze(0))
+        turns.append(turn)
+    batch_states = torch.cat(tensors).to(device)
+    batch_turns = torch.tensor(turns, dtype=torch.float32, device=device)
+    with torch.no_grad():
+        v_batch = value_model(batch_states, batch_turns).squeeze(1).cpu().numpy()
+
+    # Backpropagate each value
+    for node, v in zip(nodes, v_batch):
+        cur = node
+        while cur is not None:
+            cur.N += 1
+            if cur.game_state.turn == root_player:
+                cur.W += v
+            else:
+                cur.W += (1 - v)
+            cur = cur.parent
 
 def puct_search(
     game_state: GameState,
@@ -81,11 +106,12 @@ def puct_search(
     value_model,
     cpuct: float = EXPLORATION_WEIGHT,
     device: str = 'cpu'
-) -> tuple[int,int]:
+) -> tuple[int, int]:
 
     root = PUCTNode(game_state.clone(), policy_model=policy_model, device=device)
     root_player = game_state.turn
 
+    eval_batch = []
     for _ in range(sim_count):
         node = root
 
@@ -98,22 +124,15 @@ def puct_search(
             mv = random.choice(node.untried_moves)
             node = node.expand(mv)
 
-        # EVALUATION
-        tensor, turn = encode_board(node.game_state.board, node.game_state.turn)
-        b = torch.from_numpy(tensor).unsqueeze(0).to(device)
-        t = torch.tensor([turn], dtype=torch.float32, device=device)
-        with torch.no_grad():
-            v = value_model(b, t).item()
+        # Collect for batched evaluation
+        eval_batch.append(node)
+        if len(eval_batch) >= EVAL_BATCH_SIZE:
+            _evaluate_and_backprop(eval_batch, root_player, value_model, device)
+            eval_batch.clear()
 
-        # BACKPROPAGATION
-        cur = node
-        while cur is not None:
-            cur.N += 1
-            if cur.game_state.turn == root_player:
-                cur.W += v
-            else:
-                cur.W += (1 - v)
-            cur = cur.parent
+    # Final batch
+    if eval_batch:
+        _evaluate_and_backprop(eval_batch, root_player, value_model, device)
 
     # SELECT BEST FROM ROOT
     if root.children:
@@ -124,7 +143,6 @@ def puct_search(
 
     return best_move
 
-
 def puct_search_with_policy(
     game_state: GameState,
     sim_count: int,
@@ -132,7 +150,7 @@ def puct_search_with_policy(
     value_model,
     cpuct: float = EXPLORATION_WEIGHT,
     device: str = 'cpu'
-) -> tuple[tuple[int,int] | None, dict[tuple[int,int], float]]:
+) -> tuple[tuple[int, int] | None, dict[tuple[int, int], float]]:
     """
     Runs PUCT search and returns both the best move and
     the visit-count-based policy distribution at the root.
@@ -140,6 +158,7 @@ def puct_search_with_policy(
     root = PUCTNode(game_state.clone(), policy_model=policy_model, device=device)
     root_player = game_state.turn
 
+    eval_batch = []
     for _ in range(sim_count):
         node = root
 
@@ -152,22 +171,13 @@ def puct_search_with_policy(
             mv = random.choice(node.untried_moves)
             node = node.expand(mv)
 
-        # EVALUATION
-        tensor, turn = encode_board(node.game_state.board, node.game_state.turn)
-        b = torch.from_numpy(tensor).unsqueeze(0).to(device)
-        t = torch.tensor([turn], dtype=torch.float32, device=device)
-        with torch.no_grad():
-            v = value_model(b, t).item()
+        eval_batch.append(node)
+        if len(eval_batch) >= EVAL_BATCH_SIZE:
+            _evaluate_and_backprop(eval_batch, root_player, value_model, device)
+            eval_batch.clear()
 
-        # BACKPROPAGATION
-        cur = node
-        while cur is not None:
-            cur.N += 1
-            if cur.game_state.turn == root_player:
-                cur.W += v
-            else:
-                cur.W += (1 - v)
-            cur = cur.parent
+    if eval_batch:
+        _evaluate_and_backprop(eval_batch, root_player, value_model, device)
 
     # BUILD POLICY DISTRIBUTION
     if root.children:
