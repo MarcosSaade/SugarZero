@@ -73,6 +73,7 @@ class PUCTNode:
         self.children[move] = child
         return child
 
+
 def puct_search(
     game_state: GameState,
     sim_count: int,
@@ -122,3 +123,61 @@ def puct_search(
         best_move = random.choice(valid) if valid else None
 
     return best_move
+
+
+def puct_search_with_policy(
+    game_state: GameState,
+    sim_count: int,
+    policy_model,
+    value_model,
+    cpuct: float = EXPLORATION_WEIGHT,
+    device: str = 'cpu'
+) -> tuple[tuple[int,int] | None, dict[tuple[int,int], float]]:
+    """
+    Runs PUCT search and returns both the best move and
+    the visit-count-based policy distribution at the root.
+    """
+    root = PUCTNode(game_state.clone(), policy_model=policy_model, device=device)
+    root_player = game_state.turn
+
+    for _ in range(sim_count):
+        node = root
+
+        # SELECTION
+        while not node.untried_moves and node.children:
+            node = node.select_child(cpuct)
+
+        # EXPANSION
+        if node.untried_moves:
+            mv = random.choice(node.untried_moves)
+            node = node.expand(mv)
+
+        # EVALUATION
+        tensor, turn = encode_board(node.game_state.board, node.game_state.turn)
+        b = torch.from_numpy(tensor).unsqueeze(0).to(device)
+        t = torch.tensor([turn], dtype=torch.float32, device=device)
+        with torch.no_grad():
+            v = value_model(b, t).item()
+
+        # BACKPROPAGATION
+        cur = node
+        while cur is not None:
+            cur.N += 1
+            if cur.game_state.turn == root_player:
+                cur.W += v
+            else:
+                cur.W += (1 - v)
+            cur = cur.parent
+
+    # BUILD POLICY DISTRIBUTION
+    if root.children:
+        visit_counts = {move: child.N for move, child in root.children.items()}
+        total = sum(visit_counts.values()) or 1
+        policy_dist = {move: count / total for move, count in visit_counts.items()}
+        best_move = max(visit_counts.items(), key=lambda item: item[1])[0]
+    else:
+        valid = game_state.get_valid_moves()
+        best_move = random.choice(valid) if valid else None
+        policy_dist = {move: 1/len(valid) for move in valid} if valid else {}
+
+    return best_move, policy_dist

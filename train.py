@@ -1,0 +1,133 @@
+import argparse
+import os
+import torch
+import torch.nn.functional as F
+import torch.optim as optim
+
+from constants import EXPLORATION_WEIGHT
+from mcts import puct_search_with_policy
+from policy_net import PolicyNet
+from value_net import ValueNet
+from replay_buffer import ReplayBuffer
+from game_state import GameState
+from utils import encode_board
+
+# Hyperparameters
+NUM_SELF_PLAY_GAMES    = 1000
+MCTS_SIMULATIONS       = 100
+BATCH_SIZE             = 64
+REPLAY_BUFFER_CAPACITY = 10000
+LEARNING_RATE          = 1e-3
+CHECKPOINT_INTERVAL    = 100  # games between automatic saves
+DEVICE                 = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+
+def self_play_episode(policy_model, value_model, replay_buffer):
+    game = GameState()
+    history = []
+
+    while not game.game_over:
+        move, policy_dist = puct_search_with_policy(
+            game,
+            sim_count=MCTS_SIMULATIONS,
+            policy_model=policy_model,
+            value_model=value_model,
+            cpuct=EXPLORATION_WEIGHT,
+            device=DEVICE
+        )
+
+        board_tensor, turn = encode_board(game.board, game.turn)
+        state_tensor = torch.from_numpy(board_tensor).to(DEVICE)
+        policy_tensor = torch.zeros(81, dtype=torch.float32, device=DEVICE)
+        for (s, e), p in policy_dist.items():
+            policy_tensor[s * 9 + e] = p
+
+        history.append((state_tensor, float(turn), policy_tensor))
+        game.make_move(*move)
+
+    winner = game.winner
+    for state_tensor, turn, policy_tensor in history:
+        value = 1.0 if winner == turn else 0.0
+        replay_buffer.push(state_tensor, turn, policy_tensor, value)
+
+
+def train_step(policy_model, value_model, optimizer, replay_buffer):
+    if len(replay_buffer) < BATCH_SIZE:
+        return None
+    policy_model.train()
+    value_model.train()
+
+    states, turns, target_policies, target_values = replay_buffer.sample(BATCH_SIZE)
+    states, turns = states.to(DEVICE), turns.to(DEVICE)
+    target_policies, target_values = target_policies.to(DEVICE), target_values.to(DEVICE)
+
+    pred_policies = policy_model(states, turns)
+    pred_values   = value_model(states, turns)
+
+    policy_loss = F.kl_div(pred_policies.log(), target_policies, reduction='batchmean')
+    value_loss  = F.mse_loss(pred_values, target_values)
+    loss = policy_loss + value_loss
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    return loss.item()
+
+
+def save_checkpoint(policy_model, value_model, game_idx, output_dir="."):
+    os.makedirs(output_dir, exist_ok=True)
+    policy_path = os.path.join(output_dir, f'policy_model_{game_idx}.pt')
+    value_path  = os.path.join(output_dir, f'value_model_{game_idx}.pt')
+    torch.save(policy_model.state_dict(), policy_path)
+    torch.save(value_model.state_dict(), value_path)
+    print(f"Saved checkpoints at game {game_idx}:\n  {policy_path}\n  {value_path}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Self-play training for SugarZero")
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume training from given checkpoints and start-game index")
+    parser.add_argument("--policy-path", type=str, default="",
+                        help="Path to policy model checkpoint (.pt)")
+    parser.add_argument("--value-path", type=str, default="",
+                        help="Path to value model checkpoint (.pt)")
+    parser.add_argument("--start-game", type=int, default=1,
+                        help="Which game index to start/resume from")
+    parser.add_argument("--output-dir", type=str, default="./checkpoints",
+                        help="Directory to save model checkpoints")
+    args = parser.parse_args()
+
+    policy_model = PolicyNet().to(DEVICE)
+    value_model  = ValueNet().to(DEVICE)
+    optimizer    = optim.Adam(
+        list(policy_model.parameters()) + list(value_model.parameters()),
+        lr=LEARNING_RATE
+    )
+
+    if args.resume:
+        if args.policy_path and os.path.isfile(args.policy_path):
+            policy_model.load_state_dict(torch.load(args.policy_path, map_location=DEVICE))
+            print(f"Loaded policy model from {args.policy_path}")
+        if args.value_path and os.path.isfile(args.value_path):
+            value_model.load_state_dict(torch.load(args.value_path, map_location=DEVICE))
+            print(f"Loaded value model from {args.value_path}")
+
+    replay_buffer = ReplayBuffer(REPLAY_BUFFER_CAPACITY)
+
+    for game_idx in range(args.start_game, NUM_SELF_PLAY_GAMES + 1):
+        self_play_episode(policy_model, value_model, replay_buffer)
+        loss = train_step(policy_model, value_model, optimizer, replay_buffer)
+        if loss is not None:
+            print(f"Game {game_idx}/{NUM_SELF_PLAY_GAMES}, Loss: {loss:.4f}, Buffer: {len(replay_buffer)}")
+
+        # Automatic periodic checkpoint
+        if game_idx % CHECKPOINT_INTERVAL == 0:
+            save_checkpoint(policy_model, value_model, game_idx, output_dir=args.output_dir)
+
+    # Final save
+    save_checkpoint(policy_model, value_model, NUM_SELF_PLAY_GAMES, output_dir=args.output_dir)
+
+
+if __name__ == "__main__":
+    main()
