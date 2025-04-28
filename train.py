@@ -16,23 +16,34 @@ from utils import encode_board
 
 # Hyperparameters
 NUM_SELF_PLAY_GAMES      = 1000
-MCTS_SIMULATIONS         = 100
+MCTS_SIMULATIONS         = 400   # maximum simulations per move
+MIN_MCTS_SIMULATIONS     = 100   # starting simulations per move
 BATCH_SIZE               = 64
 REPLAY_BUFFER_CAPACITY   = 10000
 LEARNING_RATE            = 1e-3
-CHECKPOINT_INTERVAL      = 100  # games between automatic saves
-EPISODES_PER_TRAIN_BATCH = 10   # run this many self-play games before training
+CHECKPOINT_INTERVAL      = 100   # games between automatic saves
+EPISODES_PER_TRAIN_BATCH = 10    # self-play games per training batch
 DEVICE                   = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-def self_play_episode(policy_model, value_model, replay_buffer):
+def scheduled_simulations(game_idx: int) -> int:
+    """
+    Linearly interpolate number of MCTS simulations from MIN to MAX
+    across the training schedule.
+    """
+    frac = (game_idx - 1) / (NUM_SELF_PLAY_GAMES - 1)
+    sims = MIN_MCTS_SIMULATIONS + frac * (MCTS_SIMULATIONS - MIN_MCTS_SIMULATIONS)
+    return int(sims)
+
+
+def self_play_episode(policy_model, value_model, replay_buffer, sim_count: int):
     game = GameState()
     history = []
 
     while not game.game_over:
         move, policy_dist = puct_search_with_policy(
             game,
-            sim_count=MCTS_SIMULATIONS,
+            sim_count=sim_count,
             policy_model=policy_model,
             value_model=value_model,
             cpuct=EXPLORATION_WEIGHT,
@@ -120,17 +131,19 @@ def main():
 
     current_game = args.start_game
     while current_game <= NUM_SELF_PLAY_GAMES:
-        # Self-play batch
         batch_end = min(current_game + EPISODES_PER_TRAIN_BATCH - 1, NUM_SELF_PLAY_GAMES)
+
+        # Self-play batch with scheduled simulation counts
         for idx in range(current_game, batch_end + 1):
-            self_play_episode(policy_model, value_model, replay_buffer)
+            sims = scheduled_simulations(idx)
+            print(f"Self-play game {idx}: using {sims} simulations per move")
+            self_play_episode(policy_model, value_model, replay_buffer, sim_count=sims)
 
         # Training batch
         for idx in range(current_game, batch_end + 1):
             loss = train_step(policy_model, value_model, optimizer, replay_buffer)
             if loss is not None:
-                print(f"Game {idx}/{NUM_SELF_PLAY_GAMES}, "
-                      f"Loss: {loss:.4f}, Buffer: {len(replay_buffer)}")
+                print(f"Game {idx}/{NUM_SELF_PLAY_GAMES}, Loss: {loss:.4f}, Buffer: {len(replay_buffer)}")
 
         # Checkpoint at batch end
         if batch_end % CHECKPOINT_INTERVAL == 0 or batch_end == NUM_SELF_PLAY_GAMES:
