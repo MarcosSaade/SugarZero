@@ -23,7 +23,7 @@ BLUE_COLORS = [(0, 20, 220), (0, 20, 190)]
 EXPLORATION_WEIGHT = 1.4  # UCB1 exploration parameter
 
 # Dirichlet‐noise parameters (for root)
-DIRICHLET_ALPHA = 0.3
+DIRICHLET_ALPHA = 0.8 # inversely proportional to the number of moves, as seen in the AlphaZero paper
 NOISE_EPSILON   = 0.25
 
 # Sampling temperature (self-play)
