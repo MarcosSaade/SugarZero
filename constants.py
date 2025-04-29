@@ -1,4 +1,5 @@
 # constants.py
+
 import numpy as np
 
 # Game constants
@@ -15,7 +16,7 @@ WHITE = (255, 255, 255)
 STATUS_BAR_COLOR = (30, 30, 30)
 
 # Player colors
-RED_COLORS = [(200, 20, 0), (170, 20, 0)]
+RED_COLORS  = [(200, 20, 0), (170, 20, 0)]
 BLUE_COLORS = [(0, 20, 220), (0, 20, 190)]
 
 # MCTS Constants
@@ -25,11 +26,16 @@ EXPLORATION_WEIGHT = 1.4  # UCB1 exploration parameter
 DIRICHLET_ALPHA = 0.3
 NOISE_EPSILON   = 0.25
 
+# Sampling temperature (self-play)
+# During the first N moves, sample with this temperature; afterwards, use greedy.
+TEMP_MOVES_THRESHOLD = 10
+TEMPERATURE           = 1.0
+
 # AI difficulty settings
 SIMULATION_COUNTS = {
-    "Easy": 500,
+    "Easy":   500,
     "Medium": 1000,
-    "Hard": 5000
+    "Hard":   5000
 }
 
 # Initial board setup as a numpy array (9 squares × stack height 6)

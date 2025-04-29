@@ -1,4 +1,5 @@
 # utils.py
+
 import numpy as np
 
 def get_top_piece(board, square_idx):
@@ -25,7 +26,10 @@ def is_forward_move(turn, start, end):
 def encode_board(board, turn):
     """
     Encode the board and current turn into numpy arrays suitable for a neural network.
-    Channels: 0=red,1=blue; shape (2,3,3,6)
+    Channels:
+    - 0: Red pieces presence (player 0).
+    - 1: Blue pieces presence (player 1).
+    Tensor shape: (2, 3, 3, 6).
     Returns (tensor, turn).
     """
     tensor = np.zeros((2, 3, 3, 6), dtype=np.float32)
@@ -42,20 +46,29 @@ def move_to_index(move: tuple[int, int]) -> int:
     return start * 9 + end
 
 def index_to_move(idx: int) -> tuple[int, int]:
-    """Convert flat index back to (start,end)."""
+    """Convert flat index back into (start,end)."""
     return divmod(idx, 9)
 
 def dirichlet_noise(priors: dict[tuple[int,int], float], alpha: float, epsilon: float) -> dict:
     """
     Add Dirichlet noise to priors dict at root:
-      new_pi = (1 - epsilon)*pi + epsilon * eta,
-    where eta ~ Dirichlet(alpha).
+      new_pi = (1 - ε)*pi + ε * η, η ~ Dirichlet(alpha).
     """
     moves = list(priors.keys())
-    probs = np.array([priors[m] for m in moves], dtype=np.float32)
-    # sample noise
+    p = np.array([priors[m] for m in moves], dtype=np.float32)
     eta = np.random.dirichlet([alpha] * len(moves))
-    mixed = (1 - epsilon) * probs + epsilon * eta
-    # renormalize
+    mixed = (1 - epsilon) * p + epsilon * eta
     mixed /= mixed.sum()
     return {m: float(mixed[i]) for i, m in enumerate(moves)}
+
+def sample_with_temperature(policy: dict[tuple[int,int], float], temperature: float) -> tuple[int,int]:
+    """
+    Sample a move from a policy distribution dict with given softmax temperature.
+    """
+    moves = list(policy.keys())
+    probs = np.array([policy[m] for m in moves], dtype=np.float32)
+    if temperature != 1.0:
+        probs = np.power(probs, 1.0 / temperature)
+    probs /= probs.sum()
+    idx = np.random.choice(len(moves), p=probs)
+    return moves[idx]
