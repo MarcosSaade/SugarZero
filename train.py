@@ -16,7 +16,7 @@ from constants import (
     TEMP_MOVES_THRESHOLD,
     TEMPERATURE
 )
-from mcts import puct_search_with_policy
+from mcts import puct_search_with_policy, puct_search
 from policy_net import PolicyNet
 from value_net import ValueNet
 from replay_buffer import ReplayBuffer
@@ -28,27 +28,26 @@ torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
 
 # Hyperparameters
-NUM_SELF_PLAY_GAMES      = 1000
-MCTS_SIMULATIONS         = 400   # maximum simulations per move
-MIN_MCTS_SIMULATIONS     = 100   # starting simulations per move
+NUM_SELF_PLAY_GAMES      = 5000    # increased from 1000 to improve generalization
+MCTS_SIMULATIONS         = 400     # maximum simulations per move
+MIN_MCTS_SIMULATIONS     = 100     # starting simulations per move
 BATCH_SIZE               = 64
 REPLAY_BUFFER_CAPACITY   = 10000
 LEARNING_RATE            = 1e-3
-CHECKPOINT_INTERVAL      = 100
+WEIGHT_DECAY             = 1e-4    # L2 regularization term
+CHECKPOINT_INTERVAL      = 500     # evaluate every 500 games
 EPISODES_PER_TRAIN_BATCH = 10
 DEVICE                   = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 MAX_MOVES                = 200
+
 
 def scheduled_simulations(game_idx: int) -> int:
     frac = (game_idx - 1) / (NUM_SELF_PLAY_GAMES - 1)
     sims = MIN_MCTS_SIMULATIONS + frac * (MCTS_SIMULATIONS - MIN_MCTS_SIMULATIONS)
     return int(sims)
 
+
 def generate_self_play_data(policy_model, value_model, sim_count: int):
-    """
-    Run one self-play episode and return training data:
-    Returns list of (state_tensor, turn, policy_dist, value).
-    """
     game = GameState()
     history = []
 
@@ -62,7 +61,6 @@ def generate_self_play_data(policy_model, value_model, sim_count: int):
             device=DEVICE
         )
 
-        # For early moves, sample with temperature
         if len(history) < TEMP_MOVES_THRESHOLD:
             move = sample_with_temperature(policy_dist, TEMPERATURE)
 
@@ -70,11 +68,10 @@ def generate_self_play_data(policy_model, value_model, sim_count: int):
         history.append((board_tensor, float(turn), policy_dist))
         game.make_move(*move)
 
-    # Assign game outcome values
     if game.game_over:
         winner = game.winner
     else:
-        winner = None  # draw
+        winner = None
 
     output = []
     for state_tensor, turn, policy_dict in history:
@@ -82,12 +79,12 @@ def generate_self_play_data(policy_model, value_model, sim_count: int):
             value = 0.5
         else:
             value = 1.0 if winner == turn else 0.0
-        # convert policy dict to tensor aligned with 81 moves
         policy_tensor = torch.zeros(81, dtype=torch.float32)
         for (s, e), p in policy_dict.items():
             policy_tensor[s*9 + e] = p
         output.append((torch.from_numpy(state_tensor), turn, policy_tensor, value))
     return output
+
 
 def train_step(policy_model, value_model, optimizer, replay_buffer):
     if getattr(replay_buffer, 'push_count', len(replay_buffer)) < BATCH_SIZE:
@@ -113,15 +110,43 @@ def train_step(policy_model, value_model, optimizer, replay_buffer):
 
     return loss.item()
 
+
 def save_checkpoint(policy_model, value_model, game_idx, output_dir="."):
     os.makedirs(output_dir, exist_ok=True)
     torch.save(policy_model.state_dict(), os.path.join(output_dir, f'policy_model_{game_idx}.pt'))
     torch.save(value_model.state_dict(),  os.path.join(output_dir, f'value_model_{game_idx}.pt'))
     print(f"Saved checkpoints at game {game_idx}")
 
-def plot_metrics(loss_history, winrate_history, output_dir):
+
+def evaluate_vs_random(policy_model, value_model, sim_count, num_games=20):
+    wins = 0
+    for i in range(num_games):
+        game = GameState()
+        agent_player = 0 if i % 2 == 0 else 1
+        while not game.game_over:
+            if game.turn == agent_player:
+                move = puct_search(
+                    game,
+                    sim_count=sim_count,
+                    policy_model=policy_model,
+                    value_model=value_model,
+                    cpuct=EXPLORATION_WEIGHT,
+                    device=DEVICE
+                )
+            else:
+                moves = game.get_valid_moves()
+                move = moves[torch.randint(len(moves), (1,)).item()] if moves else None
+            if move:
+                game.make_move(*move)
+            else:
+                break
+        if game.winner == agent_player:
+            wins += 1
+    return wins / num_games
+
+
+def plot_metrics(loss_history, winrate_history_temp, winrate_history_no_temp, output_dir):
     os.makedirs(output_dir, exist_ok=True)
-    # Loss curve
     plt.figure()
     plt.plot(loss_history, label='Training Loss')
     plt.xlabel('Training Steps')
@@ -131,15 +156,16 @@ def plot_metrics(loss_history, winrate_history, output_dir):
     plt.savefig(os.path.join(output_dir, 'loss_curve.png'))
     plt.close()
 
-    # Win-rate curve
     plt.figure()
-    plt.plot(winrate_history, label='Win Rate vs Random')
+    plt.plot(winrate_history_temp, label='Win Rate vs Random (temp)')
+    plt.plot(winrate_history_no_temp, label='Win Rate vs Random (no temp)')
     plt.xlabel('Evaluation Episodes')
     plt.ylabel('Win Rate')
     plt.title('Win Rate Over Time')
     plt.legend()
     plt.savefig(os.path.join(output_dir, 'winrate_curve.png'))
     plt.close()
+
 
 def main():
     parser = argparse.ArgumentParser(description="Parallel self-play training for SugarZero")
@@ -155,10 +181,10 @@ def main():
     value_model  = ValueNet().to(DEVICE)
     optimizer    = optim.Adam(
         list(policy_model.parameters()) + list(value_model.parameters()),
-        lr=LEARNING_RATE
+        lr=LEARNING_RATE,
+        weight_decay=WEIGHT_DECAY
     )
 
-    # load if resuming
     if args.resume:
         if os.path.isfile(args.policy_path):
             policy_model.load_state_dict(torch.load(args.policy_path, map_location=DEVICE))
@@ -169,9 +195,9 @@ def main():
     ctx = mp.get_context("spawn")
     pbar = tqdm(total=NUM_SELF_PLAY_GAMES, desc="Self-play games")
 
-    # histories for graphing
     loss_history = []
-    winrate_history = []
+    winrate_history_temp = []
+    winrate_history_no_temp = []
 
     current_game = args.start_game
     try:
@@ -180,7 +206,6 @@ def main():
                 batch_end = min(current_game + EPISODES_PER_TRAIN_BATCH - 1,
                                 NUM_SELF_PLAY_GAMES)
 
-                # Parallel self-play
                 futures = {}
                 for idx in range(current_game, batch_end + 1):
                     sims = scheduled_simulations(idx)
@@ -193,26 +218,36 @@ def main():
                         replay_buffer.push(state, turn, policy_t, value)
                     pbar.update(1)
 
-                # Training & record loss
                 for idx in range(current_game, batch_end + 1):
                     loss = train_step(policy_model, value_model, optimizer, replay_buffer)
                     if loss is not None:
                         loss_history.append(loss)
                         print(f"Game {idx}/{NUM_SELF_PLAY_GAMES}, Loss: {loss:.4f}")
 
-                # Evaluate against random agent every checkpoint interval
                 if batch_end % CHECKPOINT_INTERVAL == 0 or batch_end == NUM_SELF_PLAY_GAMES:
-                    # simple random-eval: winrate over 20 games
-                    wins = 0
-                    for _ in range(20):
-                        # TODO: implement evaluate_vs_random(policy_model, value_model)
-                        pass
-                    winrate = wins / 20
-                    winrate_history.append(winrate)
-                    print(f"Win rate vs random at game {batch_end}: {winrate:.2f}")
+                    sim_count = MCTS_SIMULATIONS
+                    wr_temp = evaluate_vs_random(policy_model, value_model, sim_count)
+                    winrate_history_temp.append(wr_temp)
+
+                    no_temp_dir = './checkpoints_no_temp'
+                    pt_policy = os.path.join(no_temp_dir, f'policy_model_{batch_end}.pt')
+                    pt_value  = os.path.join(no_temp_dir, f'value_model_{batch_end}.pt')
+                    policy_no_temp = PolicyNet().to(DEVICE)
+                    value_no_temp  = ValueNet().to(DEVICE)
+                    if os.path.isfile(pt_policy) and os.path.isfile(pt_value):
+                        policy_no_temp.load_state_dict(torch.load(pt_policy, map_location=DEVICE))
+                        value_no_temp.load_state_dict(torch.load(pt_value, map_location=DEVICE))
+                        policy_no_temp.eval()
+                        value_no_temp.eval()
+                        wr_no_temp = evaluate_vs_random(policy_no_temp, value_no_temp, sim_count)
+                    else:
+                        wr_no_temp = 0.0
+                    winrate_history_no_temp.append(wr_no_temp)
+
+                    print(f"Win rate vs random at game {batch_end}: temp={wr_temp:.2f}, no_temp={wr_no_temp:.2f}")
 
                     save_checkpoint(policy_model, value_model, batch_end, args.output_dir)
-                    plot_metrics(loss_history, winrate_history, args.output_dir)
+                    plot_metrics(loss_history, winrate_history_temp, winrate_history_no_temp, args.output_dir)
 
                 current_game = batch_end + 1
 
@@ -220,9 +255,9 @@ def main():
 
     except KeyboardInterrupt:
         print("\nInterrupted! Saving checkpoint and plotting metrics...")
-        last_game = max(current_game - 1, args.start_game)
-        save_checkpoint(policy_model, value_model, last_game, args.output_dir)
-        plot_metrics(loss_history, winrate_history, args.output_dir)
+        last_game = max(current_game - 1, args.start-game)
+        save_checkpoint(policy_model, value_model, last_game, args.output-dir)
+        plot_metrics(loss_history, winrate_history_temp, winrate_history_no_temp, args.output-dir)
         pbar.close()
         sys.exit(1)
 
