@@ -3,6 +3,9 @@ __pycache__/
 *$py.class
 
 /tests/__venv__/
+/checkpoints/
+/checkpoints_no_temp/
 
+notes.md
 next_steps.md
 
