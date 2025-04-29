@@ -32,6 +32,15 @@ class Game:
         # Instantiate neural nets
         self.policy_model = PolicyNet().to(self.device)
         self.value_model  = ValueNet().to(self.device)
+
+        # Load trained weights if available
+        try:
+            self.policy_model.load_state_dict(torch.load("./checkpoints/policy_model_1000.pt", map_location=self.device))
+            self.value_model.load_state_dict(torch.load("./checkpoints/value_model_1000.pt", map_location=self.device))
+            print("Loaded trained AI!")
+        except FileNotFoundError:
+            print("No trained model found, using random weights.")
+
         self.policy_model.eval()
         self.value_model.eval()
 

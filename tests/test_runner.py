@@ -9,7 +9,7 @@ from test_utils import TestUtils
 from test_game_state import TestGameState
 from test_game import TestGame
 from test_mcts import TestPUCT
-from test_utils import TestUtils        # merged extended utils
+from test_utils import TestUtils
 from test_replaybuffer import TestReplayBuffer
 from test_networks import TestNetworks
 from test_train_and_data import TestTrainModule
