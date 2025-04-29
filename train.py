@@ -1,11 +1,12 @@
-# train.py
-
 import argparse
 import os
+import sys
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
-from concurrent.futures import ThreadPoolExecutor
+import torch.multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from tqdm import tqdm
 
 from constants import EXPLORATION_WEIGHT
 from mcts import puct_search_with_policy
@@ -15,29 +16,41 @@ from replay_buffer import ReplayBuffer
 from game_state import GameState
 from utils import encode_board
 
+# ---------- Tame PyTorch threading ----------
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
+
 # Hyperparameters
 NUM_SELF_PLAY_GAMES      = 1000
-MCTS_SIMULATIONS         = 400
-MIN_MCTS_SIMULATIONS     = 100
+MCTS_SIMULATIONS         = 400   # maximum simulations per move
+MIN_MCTS_SIMULATIONS     = 100   # starting simulations per move
 BATCH_SIZE               = 64
 REPLAY_BUFFER_CAPACITY   = 10000
 LEARNING_RATE            = 1e-3
-CHECKPOINT_INTERVAL      = 100
-EPISODES_PER_TRAIN_BATCH = 10
-PARALLEL_WORKERS         = 4
+CHECKPOINT_INTERVAL      = 100   # games between automatic saves
+EPISODES_PER_TRAIN_BATCH = 10    # self-play games per training batch
 DEVICE                   = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
+MAX_MOVES                = 200   # cap moves per self-play to detect draws
 
 def scheduled_simulations(game_idx: int) -> int:
+    """
+    Linearly interpolate number of MCTS simulations from MIN to MAX
+    across the training schedule.
+    """
     frac = (game_idx - 1) / (NUM_SELF_PLAY_GAMES - 1)
     sims = MIN_MCTS_SIMULATIONS + frac * (MCTS_SIMULATIONS - MIN_MCTS_SIMULATIONS)
     return int(sims)
 
-
 def generate_self_play_data(policy_model, value_model, sim_count: int):
+    """
+    Run one self-play episode and return training data instead of pushing to buffer.
+    Returns a list of tuples: (state_tensor_cpu, turn, policy_tensor_cpu, value)
+    """
     game = GameState()
     history = []
-    while not game.game_over:
+
+    # play until game over or max moves
+    while not game.game_over and game.move_count < MAX_MOVES:
         move, policy_dist = puct_search_with_policy(
             game,
             sim_count=sim_count,
@@ -46,34 +59,41 @@ def generate_self_play_data(policy_model, value_model, sim_count: int):
             cpuct=EXPLORATION_WEIGHT,
             device=DEVICE
         )
+
         board_tensor, turn = encode_board(game.board, game.turn)
         state_tensor = torch.from_numpy(board_tensor)
         policy_tensor = torch.zeros(81, dtype=torch.float32)
         for (s, e), p in policy_dist.items():
             policy_tensor[s * 9 + e] = p
+
         history.append((state_tensor, float(turn), policy_tensor))
         game.make_move(*move)
 
-    winner = game.winner
+    # Determine winner or draw
+    if game.game_over:
+        winner = game.winner
+    else:
+        winner = None  # treat as draw
+
     output = []
     for state_tensor, turn, policy_tensor in history:
-        value = 1.0 if winner == turn else 0.0
+        if winner is None:
+            value = 0.5
+        else:
+            value = 1.0 if winner == turn else 0.0
         output.append((state_tensor, turn, policy_tensor, value))
     return output
 
-
 def train_step(policy_model, value_model, optimizer, replay_buffer):
-    buf_len = len(replay_buffer)
-    if buf_len == 0:
+    if len(replay_buffer) < BATCH_SIZE:
         return None
-    # Use up to BATCH_SIZE, even if buffer smaller
-    bs = min(buf_len, BATCH_SIZE)
-    states, turns, target_policies, target_values = replay_buffer.sample(bs)
+    policy_model.train()
+    value_model.train()
+
+    states, turns, target_policies, target_values = replay_buffer.sample(BATCH_SIZE)
     states, turns = states.to(DEVICE), turns.to(DEVICE)
     target_policies, target_values = target_policies.to(DEVICE), target_values.to(DEVICE)
 
-    policy_model.train()
-    value_model.train()
     pred_policies = policy_model(states, turns)
     pred_values   = value_model(states, turns)
 
@@ -84,17 +104,16 @@ def train_step(policy_model, value_model, optimizer, replay_buffer):
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
-    return loss.item()
 
+    return loss.item()
 
 def save_checkpoint(policy_model, value_model, game_idx, output_dir="."):
     os.makedirs(output_dir, exist_ok=True)
-    ppath = os.path.join(output_dir, f'policy_model_{game_idx}.pt')
-    vpath = os.path.join(output_dir, f'value_model_{game_idx}.pt')
-    torch.save(policy_model.state_dict(), ppath)
-    torch.save(value_model.state_dict(), vpath)
-    print(f"Saved checkpoints at game {game_idx}:\n  {ppath}\n  {vpath}")
-
+    policy_path = os.path.join(output_dir, f'policy_model_{game_idx}.pt')
+    value_path  = os.path.join(output_dir, f'value_model_{game_idx}.pt')
+    torch.save(policy_model.state_dict(), policy_path)
+    torch.save(value_model.state_dict(), value_path)
+    print(f"Saved checkpoints at game {game_idx}:\n  {policy_path}\n  {value_path}")
 
 def main():
     parser = argparse.ArgumentParser(description="Parallel self-play training for SugarZero")
@@ -176,7 +195,6 @@ def main():
         pbar.close()
         print("Checkpoint saved. Exiting.")
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()
