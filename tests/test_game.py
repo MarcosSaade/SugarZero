@@ -9,7 +9,7 @@ import threading
 from queue import Queue
 
 # Import mock pygame
-from tests.mock_pygame import pygame
+import pygame
 sys.modules['pygame'] = pygame
 
 # Now import the game module that uses pygame
