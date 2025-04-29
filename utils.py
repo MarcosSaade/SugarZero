@@ -25,15 +25,8 @@ def is_forward_move(turn, start, end):
 def encode_board(board, turn):
     """
     Encode the board and current turn into numpy arrays suitable for a neural network.
-    
-    Channels:
-    - 0: Red pieces presence (player 0).
-    - 1: Blue pieces presence (player 1).
-    
-    Tensor shape: (2, 3, 3, 6) -> (player, row, col, stack height).
-    Returns:
-        tensor: np.ndarray of floats {0,1}
-        turn: int (0 or 1)
+    Channels: 0=red,1=blue; shape (2,3,3,6)
+    Returns (tensor, turn).
     """
     tensor = np.zeros((2, 3, 3, 6), dtype=np.float32)
     for idx, square in enumerate(board):
@@ -44,16 +37,25 @@ def encode_board(board, turn):
     return tensor, turn
 
 def move_to_index(move: tuple[int, int]) -> int:
-    """
-    Flatten a (start, end) move into a single index in [0,80]:
-      index = start * 9 + end
-    """
+    """Flatten a (start,end) into index in [0,80]: start*9 + end."""
     start, end = move
     return start * 9 + end
 
 def index_to_move(idx: int) -> tuple[int, int]:
-    """
-    Convert a flat index back into (start, end):
-      start = idx // 9, end = idx % 9
-    """
+    """Convert flat index back to (start,end)."""
     return divmod(idx, 9)
+
+def dirichlet_noise(priors: dict[tuple[int,int], float], alpha: float, epsilon: float) -> dict:
+    """
+    Add Dirichlet noise to priors dict at root:
+      new_pi = (1 - epsilon)*pi + epsilon * eta,
+    where eta ~ Dirichlet(alpha).
+    """
+    moves = list(priors.keys())
+    probs = np.array([priors[m] for m in moves], dtype=np.float32)
+    # sample noise
+    eta = np.random.dirichlet([alpha] * len(moves))
+    mixed = (1 - epsilon) * probs + epsilon * eta
+    # renormalize
+    mixed /= mixed.sum()
+    return {m: float(mixed[i]) for i, m in enumerate(moves)}

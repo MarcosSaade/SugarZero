@@ -4,9 +4,9 @@ import math
 import random
 import torch
 
-from constants import EXPLORATION_WEIGHT
+from constants import EXPLORATION_WEIGHT, DIRICHLET_ALPHA, NOISE_EPSILON
 from game_state import GameState
-from utils import encode_board, move_to_index
+from utils import encode_board, move_to_index, dirichlet_noise
 
 # Number of leaf evaluations to batch together
 EVAL_BATCH_SIZE = 16
@@ -34,6 +34,7 @@ class PUCTNode:
         self._init_priors()
 
     def _init_priors(self):
+        # if no policy guidance, leave empty
         if not self.untried_moves or self.policy_model is None:
             self.priors = {}
             return
@@ -76,19 +77,17 @@ class PUCTNode:
         return child
 
 def _evaluate_and_backprop(nodes, root_player, value_model, device):
-    # Batch evaluation of leaf nodes
-    tensors = []
-    turns = []
+    tensors, turns = [], []
     for node in nodes:
         tensor, turn = encode_board(node.game_state.board, node.game_state.turn)
         tensors.append(torch.from_numpy(tensor).unsqueeze(0))
         turns.append(turn)
+
     batch_states = torch.cat(tensors).to(device)
-    batch_turns = torch.tensor(turns, dtype=torch.float32, device=device)
+    batch_turns  = torch.tensor(turns, dtype=torch.float32, device=device)
     with torch.no_grad():
         v_batch = value_model(batch_states, batch_turns).squeeze(1).cpu().numpy()
 
-    # Backpropagate each value
     for node, v in zip(nodes, v_batch):
         cur = node
         while cur is not None:
@@ -108,10 +107,15 @@ def puct_search(
     device: str = 'cpu'
 ) -> tuple[int, int]:
 
+    # Root node
     root = PUCTNode(game_state.clone(), policy_model=policy_model, device=device)
-    root_player = game_state.turn
+    # Inject Dirichlet noise at root priors
+    if root.priors:
+        root.priors = dirichlet_noise(root.priors, DIRICHLET_ALPHA, NOISE_EPSILON)
 
-    eval_batch = []
+    root_player = game_state.turn
+    eval_batch   = []
+
     for _ in range(sim_count):
         node = root
 
@@ -124,17 +128,17 @@ def puct_search(
             mv = random.choice(node.untried_moves)
             node = node.expand(mv)
 
-        # Collect for batched evaluation
+        # COLLECT for batch eval
         eval_batch.append(node)
         if len(eval_batch) >= EVAL_BATCH_SIZE:
             _evaluate_and_backprop(eval_batch, root_player, value_model, device)
             eval_batch.clear()
 
-    # Final batch
+    # final batch
     if eval_batch:
         _evaluate_and_backprop(eval_batch, root_player, value_model, device)
 
-    # SELECT BEST FROM ROOT
+    # pick most‐visited child
     if root.children:
         best_move = max(root.children.items(), key=lambda item: item[1].N)[0]
     else:
@@ -151,26 +155,21 @@ def puct_search_with_policy(
     cpuct: float = EXPLORATION_WEIGHT,
     device: str = 'cpu'
 ) -> tuple[tuple[int, int] | None, dict[tuple[int, int], float]]:
-    """
-    Runs PUCT search and returns both the best move and
-    the visit-count-based policy distribution at the root.
-    """
-    root = PUCTNode(game_state.clone(), policy_model=policy_model, device=device)
-    root_player = game_state.turn
 
-    eval_batch = []
+    root = PUCTNode(game_state.clone(), policy_model=policy_model, device=device)
+    if root.priors:
+        root.priors = dirichlet_noise(root.priors, DIRICHLET_ALPHA, NOISE_EPSILON)
+
+    root_player = game_state.turn
+    eval_batch   = []
+
     for _ in range(sim_count):
         node = root
-
-        # SELECTION
         while not node.untried_moves and node.children:
             node = node.select_child(cpuct)
-
-        # EXPANSION
         if node.untried_moves:
             mv = random.choice(node.untried_moves)
             node = node.expand(mv)
-
         eval_batch.append(node)
         if len(eval_batch) >= EVAL_BATCH_SIZE:
             _evaluate_and_backprop(eval_batch, root_player, value_model, device)
@@ -179,15 +178,14 @@ def puct_search_with_policy(
     if eval_batch:
         _evaluate_and_backprop(eval_batch, root_player, value_model, device)
 
-    # BUILD POLICY DISTRIBUTION
     if root.children:
-        visit_counts = {move: child.N for move, child in root.children.items()}
+        visit_counts = {m: c.N for m, c in root.children.items()}
         total = sum(visit_counts.values()) or 1
-        policy_dist = {move: count / total for move, count in visit_counts.items()}
+        policy_dist = {m: cnt/total for m, cnt in visit_counts.items()}
         best_move = max(visit_counts.items(), key=lambda item: item[1])[0]
     else:
         valid = game_state.get_valid_moves()
-        best_move = random.choice(valid) if valid else None
-        policy_dist = {move: 1/len(valid) for move in valid} if valid else {}
+        best_move   = random.choice(valid) if valid else None
+        policy_dist = {m: 1/len(valid) for m in valid} if valid else {}
 
     return best_move, policy_dist

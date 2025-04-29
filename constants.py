@@ -21,6 +21,10 @@ BLUE_COLORS = [(0, 20, 220), (0, 20, 190)]
 # MCTS Constants
 EXPLORATION_WEIGHT = 1.4  # UCB1 exploration parameter
 
+# Dirichlet‐noise parameters (for root)
+DIRICHLET_ALPHA = 0.3
+NOISE_EPSILON   = 0.25
+
 # AI difficulty settings
 SIMULATION_COUNTS = {
     "Easy": 500,
@@ -31,9 +35,9 @@ SIMULATION_COUNTS = {
 # Initial board setup as a numpy array (9 squares × stack height 6)
 INITIAL_BOARD = np.array([
     # Opponent's pieces (top row - squares 0, 1, 2)
-    [0, 0, -1, -1, -1, -1],  # Two red pieces in square 0
-    [0, 0, -1, -1, -1, -1],  # Two red pieces in square 1
-    [0, 0, -1, -1, -1, -1],  # Two red pieces in square 2
+    [0, 0, -1, -1, -1, -1],
+    [0, 0, -1, -1, -1, -1],
+    [0, 0, -1, -1, -1, -1],
 
     # Middle row - squares 3, 4, 5
     [-1, -1, -1, -1, -1, -1],
@@ -41,9 +45,9 @@ INITIAL_BOARD = np.array([
     [-1, -1, -1, -1, -1, -1],
 
     # Player's pieces (bottom row - squares 6, 7, 8)
-    [1, 1, -1, -1, -1, -1],  # Two blue pieces in square 6
-    [1, 1, -1, -1, -1, -1],  # Two blue pieces in square 7
-    [1, 1, -1, -1, -1, -1],  # Two blue pieces in square 8
+    [1, 1, -1, -1, -1, -1],
+    [1, 1, -1, -1, -1, -1],
+    [1, 1, -1, -1, -1, -1],
 ], dtype=int)
 
 # Square adjacency mapping
