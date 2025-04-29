@@ -1,9 +1,12 @@
+# train.py
+
 import argparse
 import os
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
 from concurrent.futures import ThreadPoolExecutor
+import matplotlib.pyplot as plt
 
 from constants import EXPLORATION_WEIGHT
 from mcts import puct_search_with_policy
@@ -22,9 +25,8 @@ REPLAY_BUFFER_CAPACITY   = 10000
 LEARNING_RATE            = 1e-3
 CHECKPOINT_INTERVAL      = 100   # games between automatic saves
 EPISODES_PER_TRAIN_BATCH = 10    # self-play games per training batch
-PARALLEL_WORKERS         = 4     # number of parallel self-play workers
+PARALLEL_WORKERS         = 12     # number of parallel self-play workers
 DEVICE                   = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
 
 def scheduled_simulations(game_idx: int) -> int:
     """
@@ -34,7 +36,6 @@ def scheduled_simulations(game_idx: int) -> int:
     frac = (game_idx - 1) / (NUM_SELF_PLAY_GAMES - 1)
     sims = MIN_MCTS_SIMULATIONS + frac * (MCTS_SIMULATIONS - MIN_MCTS_SIMULATIONS)
     return int(sims)
-
 
 def generate_self_play_data(policy_model, value_model, sim_count: int):
     """
@@ -72,7 +73,6 @@ def generate_self_play_data(policy_model, value_model, sim_count: int):
         output.append((state_tensor, turn, policy_tensor, value))
     return output
 
-
 def train_step(policy_model, value_model, optimizer, replay_buffer):
     if len(replay_buffer) < BATCH_SIZE:
         return None
@@ -96,7 +96,6 @@ def train_step(policy_model, value_model, optimizer, replay_buffer):
 
     return loss.item()
 
-
 def save_checkpoint(policy_model, value_model, game_idx, output_dir="."):
     os.makedirs(output_dir, exist_ok=True)
     policy_path = os.path.join(output_dir, f'policy_model_{game_idx}.pt')
@@ -104,7 +103,6 @@ def save_checkpoint(policy_model, value_model, game_idx, output_dir="."):
     torch.save(policy_model.state_dict(), policy_path)
     torch.save(value_model.state_dict(), value_path)
     print(f"Saved checkpoints at game {game_idx}:\n  {policy_path}\n  {value_path}")
-
 
 def main():
     parser = argparse.ArgumentParser(description="Parallel self-play training for SugarZero")
@@ -137,6 +135,11 @@ def main():
 
     replay_buffer = ReplayBuffer(REPLAY_BUFFER_CAPACITY)
 
+    # For tracking and plotting
+    loss_history = []
+    buffer_history = []
+    game_indices = []
+
     with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as executor:
         current_game = args.start_game
         while current_game <= NUM_SELF_PLAY_GAMES:
@@ -158,12 +161,15 @@ def main():
                 for state, turn, policy_t, value in data:
                     replay_buffer.push(state, turn, policy_t, value)
                 print(f"Completed self-play game {idx}, buffer size: {len(replay_buffer)}")
+                buffer_history.append(len(replay_buffer))
 
             # --- Training batch ---
             for idx in range(current_game, batch_end + 1):
                 loss = train_step(policy_model, value_model, optimizer, replay_buffer)
                 if loss is not None:
                     print(f"Game {idx}/{NUM_SELF_PLAY_GAMES}, Loss: {loss:.4f}")
+                    loss_history.append(loss)
+                    game_indices.append(idx)
 
             # checkpoint
             if batch_end % CHECKPOINT_INTERVAL == 0 or batch_end == NUM_SELF_PLAY_GAMES:
@@ -171,6 +177,26 @@ def main():
 
             current_game = batch_end + 1
 
+    # Plotting at end of training
+    plt.figure()
+    plt.plot(game_indices, loss_history, label='Training Loss')
+    plt.xlabel('Game Index')
+    plt.ylabel('Loss')
+    plt.title('Self-Play Training Loss over Games')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+    plt.figure()
+    plt.plot(range(len(buffer_history)), buffer_history, label='Replay Buffer Size')
+    plt.xlabel('Self-Play Episode (order of completion)')
+    plt.ylabel('Buffer Size')
+    plt.title('Replay Buffer Growth')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
 
 if __name__ == "__main__":
     main()
