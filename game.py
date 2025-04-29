@@ -137,16 +137,26 @@ class Game:
         return self.create_game_state().is_valid_move(start, end)
 
     def make_move(self, start, end, is_simulation=False):
+        # If game already over or move invalid, set game over and winner then exit
+        if self.game_over or not self.is_valid_move(start, end):
+            if not self.game_over:
+                self.game_over = True
+                self.winner = 1 - self.turn
+            return
+
         top_s = get_top_piece(self.board, start)
         top_e = get_top_empty(self.board, end)
         self.board[end][top_e] = self.board[start][top_s]
         self.board[start][top_s] = -1
+
         if is_forward_move(self.turn, start, end):
             self.moved_forward[self.turn] = True
+
         self.move_count += 1
         if not is_simulation and self.turn == self.ai_player and self.ai_enabled:
             self.ai_move = (start, end)
         self.turn = 1 - self.turn
+
         if self.check_game_over():
             self.game_over = True
             self.winner = 1 - self.turn
@@ -211,7 +221,7 @@ class Game:
     def handle_keypress(self, key):
         if key == pygame.K_r:
             self.ai_thinking = False
-            while not self.ai_RESULT_queue.empty():
+            while not self.ai_result_queue.empty():
                 self.ai_result_queue.get()
             self.__init__(ai_enabled=self.ai_enabled, device=self.device)
         elif key == pygame.K_q:
