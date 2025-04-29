@@ -5,7 +5,9 @@ import torch
 
 class ReplayBuffer:
     def __init__(self, capacity):
+        self.capacity = capacity
         self.buffer = deque(maxlen=capacity)
+        self.push_count = 0
 
     def push(self, state, turn, policy, value):
         """
@@ -15,10 +17,15 @@ class ReplayBuffer:
             policy: torch.Tensor (81,)
             value: float (0.0 or 1.0)
         """
+        self.push_count += 1
         self.buffer.append((state, turn, policy, value))
 
     def sample(self, batch_size):
-        batch = random.sample(self.buffer, batch_size)
+        # If we don't have enough distinct items, sample with replacement
+        if batch_size <= len(self.buffer):
+            batch = random.sample(self.buffer, batch_size)
+        else:
+            batch = random.choices(self.buffer, k=batch_size)
         states, turns, policies, values = zip(*batch)
         states = torch.stack(states)                   # (batch,2,3,3,6)
         turns = torch.tensor(turns, dtype=torch.float32).unsqueeze(1)

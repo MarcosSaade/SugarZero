@@ -1,3 +1,4 @@
+# train.py
 import argparse
 import os
 import sys
@@ -7,7 +8,6 @@ import torch.optim as optim
 import torch.multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
-import matplotlib.pyplot as plt
 
 from constants import EXPLORATION_WEIGHT
 from mcts import puct_search_with_policy
@@ -33,7 +33,6 @@ EPISODES_PER_TRAIN_BATCH = 10    # self-play games per training batch
 DEVICE                   = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 MAX_MOVES                = 200   # cap moves per self-play to detect draws
 
-
 def scheduled_simulations(game_idx: int) -> int:
     """
     Linearly interpolate number of MCTS simulations from MIN to MAX
@@ -42,7 +41,6 @@ def scheduled_simulations(game_idx: int) -> int:
     frac = (game_idx - 1) / (NUM_SELF_PLAY_GAMES - 1)
     sims = MIN_MCTS_SIMULATIONS + frac * (MCTS_SIMULATIONS - MIN_MCTS_SIMULATIONS)
     return int(sims)
-
 
 def generate_self_play_data(policy_model, value_model, sim_count: int):
     """
@@ -87,10 +85,11 @@ def generate_self_play_data(policy_model, value_model, sim_count: int):
         output.append((state_tensor, turn, policy_tensor, value))
     return output
 
-
 def train_step(policy_model, value_model, optimizer, replay_buffer):
-    if len(replay_buffer) < BATCH_SIZE:
+    # use total pushes to decide when to start training
+    if getattr(replay_buffer, 'push_count', len(replay_buffer)) < BATCH_SIZE:
         return None
+
     policy_model.train()
     value_model.train()
 
@@ -111,7 +110,6 @@ def train_step(policy_model, value_model, optimizer, replay_buffer):
 
     return loss.item()
 
-
 def save_checkpoint(policy_model, value_model, game_idx, output_dir="."):
     os.makedirs(output_dir, exist_ok=True)
     policy_path = os.path.join(output_dir, f'policy_model_{game_idx}.pt')
@@ -119,7 +117,6 @@ def save_checkpoint(policy_model, value_model, game_idx, output_dir="."):
     torch.save(policy_model.state_dict(), policy_path)
     torch.save(value_model.state_dict(), value_path)
     print(f"Saved checkpoints at game {game_idx}:\n  {policy_path}\n  {value_path}")
-
 
 def main():
     parser = argparse.ArgumentParser(description="Parallel self-play training for SugarZero")
@@ -129,10 +126,10 @@ def main():
                         help="Path to policy model checkpoint (.pt)")
     parser.add_argument("--value-path", type=str, default="",
                         help="Path to value model checkpoint (.pt)")
-    parser.add_argument("--start-game", type=int, dest="start_game", default=1,
+    parser.add_argument("--start-game", type=int, default=1,
                         help="Which game index to start/resume from")
-    parser.add_argument("--output-dir", type=str, dest="output_dir", default="./checkpoints",
-                        help="Directory to save model checkpoints and plots")
+    parser.add_argument("--output-dir", type=str, default="./checkpoints",
+                        help="Directory to save model checkpoints")
     parser.add_argument("--workers", type=int, default=os.cpu_count(),
                         help="Number of parallel self-play workers (default = all cores)")
     args = parser.parse_args()
@@ -153,7 +150,6 @@ def main():
             print(f"Loaded value model from {args.value_path}")
 
     replay_buffer = ReplayBuffer(REPLAY_BUFFER_CAPACITY)
-    loss_history = []
 
     ctx = mp.get_context("spawn")
     pbar = tqdm(total=NUM_SELF_PLAY_GAMES, desc="Self-play games")
@@ -187,7 +183,6 @@ def main():
                 for idx in range(current_game, batch_end + 1):
                     loss = train_step(policy_model, value_model, optimizer, replay_buffer)
                     if loss is not None:
-                        loss_history.append((idx, loss))
                         print(f"Game {idx}/{NUM_SELF_PLAY_GAMES}, Loss: {loss:.4f}")
 
                 # checkpoint
@@ -196,18 +191,6 @@ def main():
 
                 current_game = batch_end + 1
         pbar.close()
-
-        # After training, plot loss history
-        if loss_history:
-            games, losses = zip(*loss_history)
-            plt.figure()
-            plt.plot(games, losses)
-            plt.xlabel("Game")
-            plt.ylabel("Loss")
-            plt.title("Training Loss over Time")
-            plot_path = os.path.join(args.output_dir, "loss_plot.png")
-            plt.savefig(plot_path)
-            print(f"Saved loss plot to {plot_path}")
     except KeyboardInterrupt:
         print("\nInterrupted! Saving checkpoint...")
         last_game = max(current_game - 1, args.start_game)
@@ -215,7 +198,6 @@ def main():
         pbar.close()
         print("Checkpoint saved. Exiting.")
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()
