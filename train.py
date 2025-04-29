@@ -1,12 +1,12 @@
-# train.py
-
 import argparse
 import os
+import sys
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
-from concurrent.futures import ThreadPoolExecutor
-import matplotlib.pyplot as plt
+import torch.multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from tqdm import tqdm
 
 from constants import EXPLORATION_WEIGHT
 from mcts import puct_search_with_policy
@@ -15,6 +15,10 @@ from value_net import ValueNet
 from replay_buffer import ReplayBuffer
 from game_state import GameState
 from utils import encode_board
+
+# ---------- Tame PyTorch threading ----------
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
 
 # Hyperparameters
 NUM_SELF_PLAY_GAMES      = 1000
@@ -25,8 +29,9 @@ REPLAY_BUFFER_CAPACITY   = 10000
 LEARNING_RATE            = 1e-3
 CHECKPOINT_INTERVAL      = 100   # games between automatic saves
 EPISODES_PER_TRAIN_BATCH = 10    # self-play games per training batch
-PARALLEL_WORKERS         = 12     # number of parallel self-play workers
 DEVICE                   = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+MAX_MOVES                = 200   # cap moves per self-play
+
 
 def scheduled_simulations(game_idx: int) -> int:
     """
@@ -37,6 +42,7 @@ def scheduled_simulations(game_idx: int) -> int:
     sims = MIN_MCTS_SIMULATIONS + frac * (MCTS_SIMULATIONS - MIN_MCTS_SIMULATIONS)
     return int(sims)
 
+
 def generate_self_play_data(policy_model, value_model, sim_count: int):
     """
     Run one self-play episode and return training data instead of pushing to buffer.
@@ -45,8 +51,8 @@ def generate_self_play_data(policy_model, value_model, sim_count: int):
     game = GameState()
     history = []
 
-    # play until game over
-    while not game.game_over:
+    # play until game over or max moves
+    while not game.game_over and game.move_count < MAX_MOVES:
         move, policy_dist = puct_search_with_policy(
             game,
             sim_count=sim_count,
@@ -65,13 +71,21 @@ def generate_self_play_data(policy_model, value_model, sim_count: int):
         history.append((state_tensor, float(turn), policy_tensor))
         game.make_move(*move)
 
-    winner = game.winner
+    # Determine winner or draw
+    if game.game_over:
+        winner = game.winner
+    else:
+        winner = None  # treat as draw
+
     output = []
     for state_tensor, turn, policy_tensor in history:
-        value = 1.0 if winner == turn else 0.0
-        # keep tensors on CPU for thread safety
+        if winner is None:
+            value = 0.5
+        else:
+            value = 1.0 if winner == turn else 0.0
         output.append((state_tensor, turn, policy_tensor, value))
     return output
+
 
 def train_step(policy_model, value_model, optimizer, replay_buffer):
     if len(replay_buffer) < BATCH_SIZE:
@@ -96,6 +110,7 @@ def train_step(policy_model, value_model, optimizer, replay_buffer):
 
     return loss.item()
 
+
 def save_checkpoint(policy_model, value_model, game_idx, output_dir="."):
     os.makedirs(output_dir, exist_ok=True)
     policy_path = os.path.join(output_dir, f'policy_model_{game_idx}.pt')
@@ -103,6 +118,7 @@ def save_checkpoint(policy_model, value_model, game_idx, output_dir="."):
     torch.save(policy_model.state_dict(), policy_path)
     torch.save(value_model.state_dict(), value_path)
     print(f"Saved checkpoints at game {game_idx}:\n  {policy_path}\n  {value_path}")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Parallel self-play training for SugarZero")
@@ -116,6 +132,8 @@ def main():
                         help="Which game index to start/resume from")
     parser.add_argument("--output-dir", type=str, default="./checkpoints",
                         help="Directory to save model checkpoints")
+    parser.add_argument("--workers", type=int, default=os.cpu_count(),
+                        help="Number of parallel self-play workers (default = all cores)")
     args = parser.parse_args()
 
     policy_model = PolicyNet().to(DEVICE)
@@ -135,68 +153,54 @@ def main():
 
     replay_buffer = ReplayBuffer(REPLAY_BUFFER_CAPACITY)
 
-    # For tracking and plotting
-    loss_history = []
-    buffer_history = []
-    game_indices = []
+    ctx = mp.get_context("spawn")
+    pbar = tqdm(total=NUM_SELF_PLAY_GAMES, desc="Self-play games")
+    current_game = args.start_game
+    try:
+        with ProcessPoolExecutor(max_workers=args.workers, mp_context=ctx) as executor:
+            while current_game <= NUM_SELF_PLAY_GAMES:
+                batch_end = min(current_game + EPISODES_PER_TRAIN_BATCH - 1, NUM_SELF_PLAY_GAMES)
 
-    with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as executor:
-        current_game = args.start_game
-        while current_game <= NUM_SELF_PLAY_GAMES:
-            batch_end = min(current_game + EPISODES_PER_TRAIN_BATCH - 1, NUM_SELF_PLAY_GAMES)
+                # --- Parallel self-play ---
+                futures = {}
+                for idx in range(current_game, batch_end + 1):
+                    sims = scheduled_simulations(idx)
+                    print(f"Scheduling self-play game {idx} with {sims} sims")
+                    future = executor.submit(
+                        generate_self_play_data,
+                        policy_model, value_model, sims
+                    )
+                    futures[future] = idx
 
-            # --- Parallel self-play ---
-            futures = {}
-            for idx in range(current_game, batch_end + 1):
-                sims = scheduled_simulations(idx)
-                print(f"Scheduling self-play game {idx} with {sims} sims")
-                future = executor.submit(generate_self_play_data,
-                                         policy_model, value_model, sims)
-                futures[future] = idx
+                # collect results as they finish
+                for future in as_completed(futures):
+                    idx = futures[future]
+                    data = future.result()
+                    for state, turn, policy_t, value in data:
+                        replay_buffer.push(state, turn, policy_t, value)
+                    print(f"Completed self-play game {idx}, buffer size: {len(replay_buffer)}")
+                    pbar.update(1)
 
-            # collect results
-            for future in futures:
-                idx = futures[future]
-                data = future.result()
-                for state, turn, policy_t, value in data:
-                    replay_buffer.push(state, turn, policy_t, value)
-                print(f"Completed self-play game {idx}, buffer size: {len(replay_buffer)}")
-                buffer_history.append(len(replay_buffer))
+                # --- Training batch ---
+                for idx in range(current_game, batch_end + 1):
+                    loss = train_step(policy_model, value_model, optimizer, replay_buffer)
+                    if loss is not None:
+                        print(f"Game {idx}/{NUM_SELF_PLAY_GAMES}, Loss: {loss:.4f}")
 
-            # --- Training batch ---
-            for idx in range(current_game, batch_end + 1):
-                loss = train_step(policy_model, value_model, optimizer, replay_buffer)
-                if loss is not None:
-                    print(f"Game {idx}/{NUM_SELF_PLAY_GAMES}, Loss: {loss:.4f}")
-                    loss_history.append(loss)
-                    game_indices.append(idx)
+                # checkpoint
+                if batch_end % CHECKPOINT_INTERVAL == 0 or batch_end == NUM_SELF_PLAY_GAMES:
+                    save_checkpoint(policy_model, value_model, batch_end, output_dir=args.output_dir)
 
-            # checkpoint
-            if batch_end % CHECKPOINT_INTERVAL == 0 or batch_end == NUM_SELF_PLAY_GAMES:
-                save_checkpoint(policy_model, value_model, batch_end, output_dir=args.output_dir)
+                current_game = batch_end + 1
+        pbar.close()
+    except KeyboardInterrupt:
+        print("\nInterrupted! Saving checkpoint...")
+        last_game = max(current_game - 1, args.start_game)
+        save_checkpoint(policy_model, value_model, last_game, output_dir=args.output_dir)
+        pbar.close()
+        print("Checkpoint saved. Exiting.")
+        sys.exit(1)
 
-            current_game = batch_end + 1
-
-    # Plotting at end of training
-    plt.figure()
-    plt.plot(game_indices, loss_history, label='Training Loss')
-    plt.xlabel('Game Index')
-    plt.ylabel('Loss')
-    plt.title('Self-Play Training Loss over Games')
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.show()
-
-    plt.figure()
-    plt.plot(range(len(buffer_history)), buffer_history, label='Replay Buffer Size')
-    plt.xlabel('Self-Play Episode (order of completion)')
-    plt.ylabel('Buffer Size')
-    plt.title('Replay Buffer Growth')
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.show()
 
 if __name__ == "__main__":
     main()
