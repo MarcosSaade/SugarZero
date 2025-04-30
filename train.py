@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 import torch.multiprocessing as mp
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
@@ -31,7 +31,7 @@ torch.set_num_interop_threads(1)
 # Hyperparameters
 NUM_SELF_PLAY_GAMES      = 5000    # total self-play games
 UCT_WARMUP_GAMES         = 200     # games vs UCT before NN guidance
-UCT_SIMULATIONS          = 150     # sims for warmup UCT
+UCT_SIMULATIONS          = 200     # sims for warmup UCT (improved signal)
 MCTS_SIMULATIONS         = 400     # maximum simulations per move
 MIN_MCTS_SIMULATIONS     = 100     # starting simulations per move
 BATCH_SIZE               = 64
@@ -43,6 +43,7 @@ EPISODES_PER_TRAIN_BATCH = 10
 DEVICE                   = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 MAX_MOVES                = 200
 EVAL_RANDOM_GAMES        = 50      # games to eval vs random
+WARMUP_TRAIN_STEPS       = 1000    # additional gradient steps on warmup data
 
 def scheduled_simulations(game_idx: int) -> int:
     frac = (game_idx - 1) / (NUM_SELF_PLAY_GAMES - 1)
@@ -50,12 +51,8 @@ def scheduled_simulations(game_idx: int) -> int:
     return int(sims)
 
 def generate_self_play_data(policy_model, value_model, sim_count: int):
-    """
-    Self-play using NN guidance and PUCT.
-    """
     game = GameState()
     history = []
-
     while not game.game_over and game.move_count < MAX_MOVES:
         move, policy_dist = puct_search_with_policy(
             game,
@@ -65,16 +62,13 @@ def generate_self_play_data(policy_model, value_model, sim_count: int):
             cpuct=EXPLORATION_WEIGHT,
             device=DEVICE
         )
-
         if len(history) < TEMP_MOVES_THRESHOLD:
             move = sample_with_temperature(policy_dist, TEMPERATURE)
-
         board_tensor, turn = encode_board(game.board, game.turn)
         history.append((board_tensor, float(turn), policy_dist))
         game.make_move(*move)
 
     winner = game.winner if game.game_over else None
-
     data = []
     for state_tensor, turn, policy_dict in history:
         value = 0.5 if winner is None else (1.0 if winner == turn else 0.0)
@@ -85,10 +79,6 @@ def generate_self_play_data(policy_model, value_model, sim_count: int):
     return data
 
 def generate_uct_data(sim_count: int):
-    """
-    Warmup self-play using pure UCT (no NN).
-    Record one-hot policy and outcome values.
-    """
     game = GameState()
     history = []
 
@@ -106,13 +96,11 @@ def generate_uct_data(sim_count: int):
             cpuct=EXPLORATION_WEIGHT,
             device=DEVICE
         )
-
         board_tensor, turn = encode_board(game.board, game.turn)
         history.append((board_tensor, float(turn), move))
         game.make_move(*move)
 
     winner = game.winner if game.game_over else None
-
     data = []
     for state_tensor, turn, move in history:
         value = 0.5 if winner is None else (1.0 if winner == turn else 0.0)
@@ -123,14 +111,13 @@ def generate_uct_data(sim_count: int):
 
 def evaluate_vs_random(policy_model, num_games: int, workers: int):
     """
-    Evaluate current policy_model vs uniform random mover.
-    Returns win rate for policy_model playing first/second.
+    Evaluate current policy_model vs uniform random mover using threads
+    (avoids pickling issues).
     """
     def one_game(starting_player: int):
         game = GameState()
         while not game.game_over and game.move_count < MAX_MOVES:
             if game.turn == starting_player:
-                # policy move
                 move, _ = puct_search_with_policy(
                     game,
                     sim_count=MIN_MCTS_SIMULATIONS,
@@ -140,14 +127,13 @@ def evaluate_vs_random(policy_model, num_games: int, workers: int):
                     device=DEVICE
                 )
             else:
-                # random move
                 moves = game.get_valid_moves()
                 move = random.choice(moves) if moves else None
             game.make_move(*move)
         return game.winner == starting_player
 
     wins = 0
-    with ProcessPoolExecutor(max_workers=workers) as exec:
+    with ThreadPoolExecutor(max_workers=workers) as exec:
         futures = [exec.submit(one_game, i % 2) for i in range(num_games)]
         for f in as_completed(futures):
             if f.result():
@@ -157,25 +143,21 @@ def evaluate_vs_random(policy_model, num_games: int, workers: int):
 def train_step(policy_model, value_model, optimizer, replay_buffer):
     if replay_buffer.push_count < BATCH_SIZE:
         return None
-
     policy_model.train()
     value_model.train()
-
     states, turns, target_policies, target_values = replay_buffer.sample(BATCH_SIZE)
     states, turns = states.to(DEVICE), turns.to(DEVICE)
     target_policies, target_values = target_policies.to(DEVICE), target_values.to(DEVICE)
 
     pred_policies = policy_model(states, turns)
     pred_values   = value_model(states, turns)
-
-    policy_loss = F.kl_div(pred_policies.log(), target_policies, reduction='batchmean')
-    value_loss  = F.mse_loss(pred_values, target_values)
+    policy_loss   = F.kl_div(pred_policies.log(), target_policies, reduction='batchmean')
+    value_loss    = F.mse_loss(pred_values, target_values)
     loss = policy_loss + value_loss
 
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
-
     return loss.item()
 
 def save_checkpoint(policy_model, value_model, game_idx, output_dir="."):
@@ -236,15 +218,28 @@ def main():
 
     loss_history = []
     eval_history = []
+    warmup_trained = False
     current_game = args.start_game
 
     try:
         with ProcessPoolExecutor(max_workers=args.workers, mp_context=ctx) as executor:
             while current_game <= NUM_SELF_PLAY_GAMES:
+                # after UCT warmup, do extra training on that buffer
+                if not warmup_trained and current_game > UCT_WARMUP_GAMES:
+                    print(f"\n=== Training on warm-up data for {WARMUP_TRAIN_STEPS} steps ===")
+                    for step in range(1, WARMUP_TRAIN_STEPS + 1):
+                        loss = train_step(policy_model, value_model, optimizer, replay_buffer)
+                        if loss is not None:
+                            loss_history.append(loss)
+                            if step % 100 == 0:
+                                print(f"[Warmup Train] Step {step}, Loss: {loss:.4f}")
+                    warmup_trained = True
+                    print("=== Warm-up training complete, resuming self-play ===\n")
+
                 batch_end = min(current_game + EPISODES_PER_TRAIN_BATCH - 1,
                                 NUM_SELF_PLAY_GAMES)
 
-                # choose warmup or guided self-play
+                # generate data
                 futures = {}
                 for idx in range(current_game, batch_end + 1):
                     if idx <= UCT_WARMUP_GAMES:
@@ -256,21 +251,21 @@ def main():
                             policy_model, value_model, sims
                         )] = idx
 
-                # collect self-play data
+                # collect and enqueue
                 for future in as_completed(futures):
                     data = future.result()
                     for state, turn, policy_t, value in data:
                         replay_buffer.push(state, turn, policy_t, value)
                     pbar.update(1)
 
-                # training steps
+                # train on new data and print loss
                 for idx in range(current_game, batch_end + 1):
                     loss = train_step(policy_model, value_model, optimizer, replay_buffer)
                     if loss is not None:
                         loss_history.append(loss)
                         print(f"[Train] Game {idx}, Loss: {loss:.4f}")
 
-                # periodic checkpoint, eval, plotting
+                # checkpoint / eval / plot
                 if batch_end % CHECKPOINT_INTERVAL == 0 or batch_end == NUM_SELF_PLAY_GAMES:
                     save_checkpoint(policy_model, value_model, batch_end, args.output_dir)
                     plot_loss_curve(loss_history, args.output_dir)
