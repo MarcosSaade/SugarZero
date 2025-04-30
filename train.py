@@ -4,6 +4,7 @@ import argparse
 import os
 import sys
 import random
+import json
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
@@ -12,6 +13,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_compl
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
+import constants
 from constants import (
     EXPLORATION_WEIGHT,
     TEMP_MOVES_THRESHOLD,
@@ -29,21 +31,24 @@ torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
 
 # Hyperparameters
-NUM_SELF_PLAY_GAMES      = 5000    # total self-play games
-UCT_WARMUP_GAMES         = 200     # games vs UCT before NN guidance
-UCT_SIMULATIONS          = 200     # sims for warmup UCT (improved signal)
-MCTS_SIMULATIONS         = 400     # maximum simulations per move
-MIN_MCTS_SIMULATIONS     = 100     # starting simulations per move
+NUM_SELF_PLAY_GAMES      = 5000
+UCT_WARMUP_GAMES         = 200
+UCT_SIMULATIONS          = 200
+MCTS_SIMULATIONS         = 400
+MIN_MCTS_SIMULATIONS     = 100
 BATCH_SIZE               = 64
 REPLAY_BUFFER_CAPACITY   = 10000
 LEARNING_RATE            = 1e-3
-WEIGHT_DECAY             = 1e-4    # L2 regularization
-CHECKPOINT_INTERVAL      = 500     # save checkpoint & eval every this many games
+WEIGHT_DECAY             = 1e-4
+CHECKPOINT_INTERVAL      = 500
 EPISODES_PER_TRAIN_BATCH = 10
 DEVICE                   = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 MAX_MOVES                = 200
-EVAL_RANDOM_GAMES        = 50      # games to eval vs random
-WARMUP_TRAIN_STEPS       = 1000    # additional gradient steps on warmup data
+EVAL_RANDOM_GAMES        = 50
+WARMUP_TRAIN_STEPS       = 1000
+
+LOSS_LOG_FILENAME = "loss_history.json"
+EVAL_LOG_FILENAME = "eval_history.json"
 
 def scheduled_simulations(game_idx: int) -> int:
     frac = (game_idx - 1) / (NUM_SELF_PLAY_GAMES - 1)
@@ -82,7 +87,6 @@ def generate_uct_data(sim_count: int):
     game = GameState()
     history = []
 
-    # dummy value model always returns 0.5
     def _dummy_value(states, turns):
         bsz = states.size(0)
         return torch.full((bsz, 1), 0.5, device=DEVICE)
@@ -111,10 +115,14 @@ def generate_uct_data(sim_count: int):
 
 def evaluate_vs_random(policy_model, num_games: int, workers: int):
     """
-    Evaluate current policy_model vs uniform random mover using threads
-    (avoids pickling issues).
+    Evaluate policy_model vs random, disabling noise & temperature.
     """
-    # dummy value model for evaluation
+    # monkey-patch constants to disable randomness in MCTS
+    orig_eps = constants.NOISE_EPSILON
+    orig_temp_moves = constants.TEMP_MOVES_THRESHOLD
+    constants.NOISE_EPSILON = 0.0
+    constants.TEMP_MOVES_THRESHOLD = 0
+
     def _eval_dummy_value(states, turns):
         bsz = states.size(0)
         return torch.full((bsz, 1), 0.5, device=DEVICE)
@@ -143,6 +151,11 @@ def evaluate_vs_random(policy_model, num_games: int, workers: int):
         for f in as_completed(futures):
             if f.result():
                 wins += 1
+
+    # restore constants
+    constants.NOISE_EPSILON = orig_eps
+    constants.TEMP_MOVES_THRESHOLD = orig_temp_moves
+
     return wins / num_games
 
 def train_step(policy_model, value_model, optimizer, replay_buffer):
@@ -164,6 +177,14 @@ def train_step(policy_model, value_model, optimizer, replay_buffer):
     loss.backward()
     optimizer.step()
     return loss.item()
+
+def save_json(data, path):
+    with open(path, 'w') as f:
+        json.dump(data, f)
+
+def load_json(path):
+    with open(path, 'r') as f:
+        return json.load(f)
 
 def save_checkpoint(policy_model, value_model, game_idx, output_dir="."):
     os.makedirs(output_dir, exist_ok=True)
@@ -203,6 +224,18 @@ def main():
     parser.add_argument("--workers",    type=int,  default=os.cpu_count(), help="Parallel workers")
     args = parser.parse_args()
 
+    # load or init histories
+    loss_history_path = os.path.join(args.output_dir, LOSS_LOG_FILENAME)
+    eval_history_path = os.path.join(args.output_dir, EVAL_LOG_FILENAME)
+    if args.resume and os.path.exists(loss_history_path):
+        loss_history = load_json(loss_history_path)
+    else:
+        loss_history = []
+    if args.resume and os.path.exists(eval_history_path):
+        eval_history = load_json(eval_history_path)
+    else:
+        eval_history = []
+
     policy_model = PolicyNet().to(DEVICE)
     value_model  = ValueNet().to(DEVICE)
     optimizer    = optim.Adam(
@@ -221,15 +254,13 @@ def main():
     ctx = mp.get_context("spawn")
     pbar = tqdm(total=NUM_SELF_PLAY_GAMES, desc="Self-play games")
 
-    loss_history = []
-    eval_history = []
     warmup_trained = False
     current_game = args.start_game
 
     try:
         with ProcessPoolExecutor(max_workers=args.workers, mp_context=ctx) as executor:
             while current_game <= NUM_SELF_PLAY_GAMES:
-                # after UCT warmup, do extra training on that buffer
+                # warm-up training
                 if not warmup_trained and current_game > UCT_WARMUP_GAMES:
                     print(f"\n=== Training on warm-up data for {WARMUP_TRAIN_STEPS} steps ===")
                     for step in range(1, WARMUP_TRAIN_STEPS + 1):
@@ -256,28 +287,32 @@ def main():
                             policy_model, value_model, sims
                         )] = idx
 
-                # collect and enqueue
                 for future in as_completed(futures):
                     data = future.result()
                     for state, turn, policy_t, value in data:
                         replay_buffer.push(state, turn, policy_t, value)
                     pbar.update(1)
 
-                # train on new data and print loss
+                # train on new data
                 for idx in range(current_game, batch_end + 1):
                     loss = train_step(policy_model, value_model, optimizer, replay_buffer)
                     if loss is not None:
                         loss_history.append(loss)
                         print(f"[Train] Game {idx}, Loss: {loss:.4f}")
 
-                # checkpoint / eval / plot
+                # checkpoint, eval, plot
                 if batch_end % CHECKPOINT_INTERVAL == 0 or batch_end == NUM_SELF_PLAY_GAMES:
                     save_checkpoint(policy_model, value_model, batch_end, args.output_dir)
+                    # persist histories
+                    save_json(loss_history, loss_history_path)
+                    save_json(eval_history, eval_history_path)
                     plot_loss_curve(loss_history, args.output_dir)
 
                     winrate = evaluate_vs_random(policy_model, EVAL_RANDOM_GAMES, args.workers)
                     eval_history.append(winrate)
                     print(f"[Eval] Win rate vs random at game {batch_end}: {winrate:.2f}")
+                    # persist histories again
+                    save_json(eval_history, eval_history_path)
                     plot_eval_curve(eval_history, args.output_dir)
 
                 current_game = batch_end + 1
@@ -285,9 +320,12 @@ def main():
         pbar.close()
 
     except KeyboardInterrupt:
-        print("\nInterrupted! Saving last checkpoint and plots...")
+        print("\nInterrupted! Saving last checkpoint and histories...")
         last_game = max(current_game - 1, args.start_game)
         save_checkpoint(policy_model, value_model, last_game, args.output_dir)
+        # persist histories
+        save_json(loss_history, loss_history_path)
+        save_json(eval_history, eval_history_path)
         plot_loss_curve(loss_history, args.output_dir)
         plot_eval_curve(eval_history, args.output_dir)
         pbar.close()
