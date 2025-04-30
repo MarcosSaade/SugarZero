@@ -35,8 +35,8 @@ class Game:
 
         # Load trained weights if available
         try:
-            self.policy_model.load_state_dict(torch.load("./checkpoints/policy_model_1000.pt", map_location=self.device))
-            self.value_model.load_state_dict(torch.load("./checkpoints/value_model_1000.pt", map_location=self.device))
+            self.policy_model.load_state_dict(torch.load("./checkpoints/policy_model_5000.pt", map_location=self.device))
+            self.value_model.load_state_dict(torch.load("./checkpoints/value_model_5000.pt", map_location=self.device))
             print("Loaded trained AI!")
         except FileNotFoundError:
             print("No trained model found, using random weights.")
