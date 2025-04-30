@@ -114,6 +114,11 @@ def evaluate_vs_random(policy_model, num_games: int, workers: int):
     Evaluate current policy_model vs uniform random mover using threads
     (avoids pickling issues).
     """
+    # dummy value model for evaluation
+    def _eval_dummy_value(states, turns):
+        bsz = states.size(0)
+        return torch.full((bsz, 1), 0.5, device=DEVICE)
+
     def one_game(starting_player: int):
         game = GameState()
         while not game.game_over and game.move_count < MAX_MOVES:
@@ -122,7 +127,7 @@ def evaluate_vs_random(policy_model, num_games: int, workers: int):
                     game,
                     sim_count=MIN_MCTS_SIMULATIONS,
                     policy_model=policy_model,
-                    value_model=None,
+                    value_model=_eval_dummy_value,
                     cpuct=EXPLORATION_WEIGHT,
                     device=DEVICE
                 )
