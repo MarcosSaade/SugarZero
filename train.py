@@ -32,10 +32,10 @@ torch.set_num_interop_threads(1)
 
 # Hyperparameters
 NUM_SELF_PLAY_GAMES      = 5000
-UCT_WARMUP_GAMES         = 200
+UCT_WARMUP_GAMES         = 400     # increased per discussion
 UCT_SIMULATIONS          = 200
-MCTS_SIMULATIONS         = 400
-MIN_MCTS_SIMULATIONS     = 100
+MCTS_SIMULATIONS         = 600
+MIN_MCTS_SIMULATIONS     = 200
 BATCH_SIZE               = 64
 REPLAY_BUFFER_CAPACITY   = 10000
 LEARNING_RATE            = 1e-3
@@ -47,13 +47,27 @@ MAX_MOVES                = 200
 EVAL_RANDOM_GAMES        = 50
 WARMUP_TRAIN_STEPS       = 1000
 
-LOSS_LOG_FILENAME = "loss_history.json"
-EVAL_LOG_FILENAME = "eval_history.json"
+# filenames for persistent logs
+LOSS_LOG_FILENAME    = "loss_history.json"
+EVAL_LOG_FILENAME    = "eval_history.json"
+ENTROPY_LOG_FILENAME = "entropy_history.json"
+
+
+def save_json(data, path):
+    with open(path, 'w') as f:
+        json.dump(data, f)
+
+
+def load_json(path):
+    with open(path, 'r') as f:
+        return json.load(f)
+
 
 def scheduled_simulations(game_idx: int) -> int:
     frac = (game_idx - 1) / (NUM_SELF_PLAY_GAMES - 1)
     sims = MIN_MCTS_SIMULATIONS + frac * (MCTS_SIMULATIONS - MIN_MCTS_SIMULATIONS)
     return int(sims)
+
 
 def generate_self_play_data(policy_model, value_model, sim_count: int):
     game = GameState()
@@ -69,6 +83,7 @@ def generate_self_play_data(policy_model, value_model, sim_count: int):
         )
         if len(history) < TEMP_MOVES_THRESHOLD:
             move = sample_with_temperature(policy_dist, TEMPERATURE)
+
         board_tensor, turn = encode_board(game.board, game.turn)
         history.append((board_tensor, float(turn), policy_dist))
         game.make_move(*move)
@@ -82,6 +97,7 @@ def generate_self_play_data(policy_model, value_model, sim_count: int):
             policy_tensor[s * 9 + e] = p
         data.append((torch.from_numpy(state_tensor), turn, policy_tensor, value))
     return data
+
 
 def generate_uct_data(sim_count: int):
     game = GameState()
@@ -113,14 +129,15 @@ def generate_uct_data(sim_count: int):
         data.append((torch.from_numpy(state_tensor), turn, policy_tensor, value))
     return data
 
+
 def evaluate_vs_random(policy_model, num_games: int, workers: int):
     """
-    Evaluate policy_model vs random, disabling noise & temperature.
+    Eval vs random: disable exploration noise & temp during eval.
     """
-    # monkey-patch constants to disable randomness in MCTS
-    orig_eps = constants.NOISE_EPSILON
-    orig_temp_moves = constants.TEMP_MOVES_THRESHOLD
-    constants.NOISE_EPSILON = 0.0
+    # temporarily mute randomness
+    orig_eps      = constants.NOISE_EPSILON
+    orig_temp_th  = constants.TEMP_MOVES_THRESHOLD
+    constants.NOISE_EPSILON    = 0.0
     constants.TEMP_MOVES_THRESHOLD = 0
 
     def _eval_dummy_value(states, turns):
@@ -152,11 +169,12 @@ def evaluate_vs_random(policy_model, num_games: int, workers: int):
             if f.result():
                 wins += 1
 
-    # restore constants
-    constants.NOISE_EPSILON = orig_eps
-    constants.TEMP_MOVES_THRESHOLD = orig_temp_moves
+    # restore
+    constants.NOISE_EPSILON    = orig_eps
+    constants.TEMP_MOVES_THRESHOLD = orig_temp_th
 
     return wins / num_games
+
 
 def train_step(policy_model, value_model, optimizer, replay_buffer):
     if replay_buffer.push_count < BATCH_SIZE:
@@ -169,22 +187,29 @@ def train_step(policy_model, value_model, optimizer, replay_buffer):
 
     pred_policies = policy_model(states, turns)
     pred_values   = value_model(states, turns)
-    policy_loss   = F.kl_div(pred_policies.log(), target_policies, reduction='batchmean')
-    value_loss    = F.mse_loss(pred_values, target_values)
+
+    policy_loss = F.kl_div(pred_policies.log(), target_policies, reduction='batchmean')
+    value_loss  = F.mse_loss(pred_values, target_values)
     loss = policy_loss + value_loss
 
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
+
     return loss.item()
 
-def save_json(data, path):
-    with open(path, 'w') as f:
-        json.dump(data, f)
 
-def load_json(path):
-    with open(path, 'r') as f:
-        return json.load(f)
+def compute_policy_entropy(policy_model, replay_buffer, batch_size=64):
+    if len(replay_buffer) < batch_size:
+        return None
+    states, turns, _, _ = replay_buffer.sample(batch_size)
+    states, turns = states.to(DEVICE), turns.to(DEVICE)
+    with torch.no_grad():
+        probs = policy_model(states, turns)
+        logp  = torch.log(probs + 1e-8)
+        entropy = -(probs * logp).sum(dim=1).mean().item()
+    return entropy
+
 
 def save_checkpoint(policy_model, value_model, game_idx, output_dir="."):
     os.makedirs(output_dir, exist_ok=True)
@@ -194,47 +219,37 @@ def save_checkpoint(policy_model, value_model, game_idx, output_dir="."):
                os.path.join(output_dir, f'value_model_{game_idx}.pt'))
     print(f"Saved checkpoint at game {game_idx}")
 
-def plot_loss_curve(loss_history, output_dir):
+
+def plot_curve(history, output_dir, filename, xlabel, ylabel, title, label):
     plt.figure()
-    plt.plot(loss_history, label='Training Loss')
-    plt.xlabel('Training Steps')
-    plt.ylabel('Loss')
-    plt.title('Training Loss Over Time')
+    plt.plot(history, label=label)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.title(title)
     plt.legend()
-    plt.savefig(os.path.join(output_dir, 'loss_curve.png'))
+    plt.savefig(os.path.join(output_dir, filename))
     plt.close()
 
-def plot_eval_curve(eval_history, output_dir):
-    plt.figure()
-    plt.plot(eval_history, label='Win Rate vs Random')
-    plt.xlabel(f'Evaluation (every {CHECKPOINT_INTERVAL} games)')
-    plt.ylabel('Win Rate')
-    plt.title('Win Rate Over Time')
-    plt.legend()
-    plt.savefig(os.path.join(output_dir, 'winrate_curve.png'))
-    plt.close()
 
 def main():
     parser = argparse.ArgumentParser(description="Self-play training for SugarZero")
-    parser.add_argument("--resume", action="store_true", help="Resume from checkpoints")
-    parser.add_argument("--policy-path", type=str, default="", help="Policy checkpoint path")
-    parser.add_argument("--value-path",  type=str, default="", help="Value checkpoint path")
-    parser.add_argument("--start-game", type=int, default=1, help="Game index to start from")
-    parser.add_argument("--output-dir", type=str,  default="./checkpoints", help="Directory to save outputs")
-    parser.add_argument("--workers",    type=int,  default=os.cpu_count(), help="Parallel workers")
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--policy-path", type=str, default="")
+    parser.add_argument("--value-path",  type=str, default="")
+    parser.add_argument("--start-game", type=int, default=1)
+    parser.add_argument("--output-dir", type=str,  default="./checkpoints")
+    parser.add_argument("--workers",    type=int,  default=os.cpu_count())
     args = parser.parse_args()
 
-    # load or init histories
-    loss_history_path = os.path.join(args.output_dir, LOSS_LOG_FILENAME)
-    eval_history_path = os.path.join(args.output_dir, EVAL_LOG_FILENAME)
-    if args.resume and os.path.exists(loss_history_path):
-        loss_history = load_json(loss_history_path)
-    else:
-        loss_history = []
-    if args.resume and os.path.exists(eval_history_path):
-        eval_history = load_json(eval_history_path)
-    else:
-        eval_history = []
+    os.makedirs(args.output_dir, exist_ok=True)
+    # load or init logs
+    loss_path    = os.path.join(args.output_dir, LOSS_LOG_FILENAME)
+    eval_path    = os.path.join(args.output_dir, EVAL_LOG_FILENAME)
+    entropy_path = os.path.join(args.output_dir, ENTROPY_LOG_FILENAME)
+
+    loss_history    = load_json(loss_path)    if args.resume and os.path.exists(loss_path)    else []
+    eval_history    = load_json(eval_path)    if args.resume and os.path.exists(eval_path)    else []
+    entropy_history = load_json(entropy_path) if args.resume and os.path.exists(entropy_path) else []
 
     policy_model = PolicyNet().to(DEVICE)
     value_model  = ValueNet().to(DEVICE)
@@ -255,12 +270,12 @@ def main():
     pbar = tqdm(total=NUM_SELF_PLAY_GAMES, desc="Self-play games")
 
     warmup_trained = False
-    current_game = args.start_game
+    current_game   = args.start_game
 
     try:
         with ProcessPoolExecutor(max_workers=args.workers, mp_context=ctx) as executor:
             while current_game <= NUM_SELF_PLAY_GAMES:
-                # warm-up training
+                # after warm-up, train extra on UCT data
                 if not warmup_trained and current_game > UCT_WARMUP_GAMES:
                     print(f"\n=== Training on warm-up data for {WARMUP_TRAIN_STEPS} steps ===")
                     for step in range(1, WARMUP_TRAIN_STEPS + 1):
@@ -275,7 +290,7 @@ def main():
                 batch_end = min(current_game + EPISODES_PER_TRAIN_BATCH - 1,
                                 NUM_SELF_PLAY_GAMES)
 
-                # generate data
+                # generate self-play or UCT data
                 futures = {}
                 for idx in range(current_game, batch_end + 1):
                     if idx <= UCT_WARMUP_GAMES:
@@ -287,6 +302,7 @@ def main():
                             policy_model, value_model, sims
                         )] = idx
 
+                # collect
                 for future in as_completed(futures):
                     data = future.result()
                     for state, turn, policy_t, value in data:
@@ -299,37 +315,55 @@ def main():
                     if loss is not None:
                         loss_history.append(loss)
                         print(f"[Train] Game {idx}, Loss: {loss:.4f}")
+                        # policy entropy
+                        ent = compute_policy_entropy(policy_model, replay_buffer)
+                        if ent is not None:
+                            entropy_history.append(ent)
+                            print(f"[Entropy] After Game {idx}, Entropy: {ent:.4f}")
 
-                # checkpoint, eval, plot
+                # checkpoint / eval / plot
                 if batch_end % CHECKPOINT_INTERVAL == 0 or batch_end == NUM_SELF_PLAY_GAMES:
                     save_checkpoint(policy_model, value_model, batch_end, args.output_dir)
-                    # persist histories
-                    save_json(loss_history, loss_history_path)
-                    save_json(eval_history, eval_history_path)
-                    plot_loss_curve(loss_history, args.output_dir)
-
-                    winrate = evaluate_vs_random(policy_model, EVAL_RANDOM_GAMES, args.workers)
-                    eval_history.append(winrate)
-                    print(f"[Eval] Win rate vs random at game {batch_end}: {winrate:.2f}")
-                    # persist histories again
-                    save_json(eval_history, eval_history_path)
-                    plot_eval_curve(eval_history, args.output_dir)
+                    # persist logs
+                    save_json(loss_history, loss_path)
+                    save_json(eval_history, eval_path)
+                    save_json(entropy_history, entropy_path)
+                    # plots
+                    plot_curve(loss_history, args.output_dir,
+                               "loss_curve.png", "Training Steps", "Loss",
+                               "Training Loss Over Time", "Loss")
+                    plot_curve(eval_history, args.output_dir,
+                               "winrate_curve.png", "Eval (x500 games)", "Win Rate",
+                               "Win Rate Over Time vs Random", "WinRate")
+                    plot_curve(entropy_history, args.output_dir,
+                               "entropy_curve.png", "Training Steps", "Policy Entropy",
+                               "Policy Entropy Over Time", "Entropy")
 
                 current_game = batch_end + 1
 
         pbar.close()
 
     except KeyboardInterrupt:
-        print("\nInterrupted! Saving last checkpoint and histories...")
+        print("\nInterrupted! Saving checkpoint & logs...")
         last_game = max(current_game - 1, args.start_game)
         save_checkpoint(policy_model, value_model, last_game, args.output_dir)
-        # persist histories
-        save_json(loss_history, loss_history_path)
-        save_json(eval_history, eval_history_path)
-        plot_loss_curve(loss_history, args.output_dir)
-        plot_eval_curve(eval_history, args.output_dir)
+        # persist logs
+        save_json(loss_history, loss_path)
+        save_json(eval_history, eval_path)
+        save_json(entropy_history, entropy_path)
+        # final plots
+        plot_curve(loss_history, args.output_dir,
+                   "loss_curve.png", "Training Steps", "Loss",
+                   "Training Loss Over Time", "Loss")
+        plot_curve(eval_history, args.output-dir,
+                   "winrate_curve.png", "Eval (x500 games)", "Win Rate",
+                   "Win Rate Over Time vs Random", "WinRate")
+        plot_curve(entropy_history, args.output-dir,
+                   "entropy_curve.png", "Training Steps", "Policy Entropy",
+                   "Policy Entropy Over Time", "Entropy")
         pbar.close()
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
