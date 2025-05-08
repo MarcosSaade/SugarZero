@@ -32,7 +32,7 @@ torch.set_num_interop_threads(1)
 
 # Hyperparameters
 NUM_SELF_PLAY_GAMES      = 5000
-UCT_WARMUP_GAMES         = 400     # increased per discussion
+UCT_WARMUP_GAMES         = 400     
 UCT_SIMULATIONS          = 200
 MCTS_SIMULATIONS         = 600
 MIN_MCTS_SIMULATIONS     = 200
@@ -67,6 +67,31 @@ def scheduled_simulations(game_idx: int) -> int:
     frac = (game_idx - 1) / (NUM_SELF_PLAY_GAMES - 1)
     sims = MIN_MCTS_SIMULATIONS + frac * (MCTS_SIMULATIONS - MIN_MCTS_SIMULATIONS)
     return int(sims)
+
+
+def generate_random_data():
+    """
+    Pure random-play games to seed buffer.
+    Returns list of (state, turn, policy_tensor, value, origin).
+    """
+    game = GameState()
+    history = []
+    while not game.game_over and game.move_count < MAX_MOVES:
+        moves = game.get_valid_moves()
+        move = random.choice(moves) if moves else None
+        board_tensor, turn = encode_board(game.board, game.turn)
+        history.append((board_tensor, float(turn), move))
+        game.make_move(*move)
+
+    winner = game.winner if game.game_over else None
+    data = []
+    for state_tensor, turn, move in history:
+        val = 0.5 if winner is None else (1.0 if winner == turn else 0.0)
+        policy_tensor = torch.zeros(81, dtype=torch.float32)
+        if move is not None:
+            policy_tensor[move[0]*9 + move[1]] = 1.0
+        data.append((torch.from_numpy(state_tensor), turn, policy_tensor, val))
+    return data
 
 
 def generate_self_play_data(policy_model, value_model, sim_count: int):
@@ -265,7 +290,8 @@ def main():
         if os.path.isfile(args.value_path):
             value_model.load_state_dict(torch.load(args.value_path, map_location=DEVICE))
 
-    replay_buffer = ReplayBuffer(REPLAY_BUFFER_CAPACITY)
+    replay_buffer = ReplayBuffer(REPLAY_BUFFER_CAPACITY,
+                                 mix_ratios={"uct":0.2, "random":0.1, "self":0.7})
     ctx = mp.get_context("spawn")
     pbar = tqdm(total=NUM_SELF_PLAY_GAMES, desc="Self-play games")
 
@@ -275,7 +301,7 @@ def main():
     try:
         with ProcessPoolExecutor(max_workers=args.workers, mp_context=ctx) as executor:
             while current_game <= NUM_SELF_PLAY_GAMES:
-                # after warm-up, train extra on UCT data
+                # after UCT warm-up, train extra on UCT data
                 if not warmup_trained and current_game > UCT_WARMUP_GAMES:
                     print(f"\n=== Training on warm-up data for {WARMUP_TRAIN_STEPS} steps ===")
                     for step in range(1, WARMUP_TRAIN_STEPS + 1):
@@ -290,45 +316,50 @@ def main():
                 batch_end = min(current_game + EPISODES_PER_TRAIN_BATCH - 1,
                                 NUM_SELF_PLAY_GAMES)
 
-                # generate self-play or UCT data
-                futures = {}
+                # generate UCT, random, or neural self-play data
+                futures = {}  # maps Future -> origin tag
                 for idx in range(current_game, batch_end + 1):
                     if idx <= UCT_WARMUP_GAMES:
-                        futures[executor.submit(generate_uct_data, UCT_SIMULATIONS)] = idx
+                        fut = executor.submit(generate_uct_data, UCT_SIMULATIONS)
+                        futures[fut] = "uct"
                     else:
-                        sims = scheduled_simulations(idx)
-                        futures[executor.submit(
-                            generate_self_play_data,
-                            policy_model, value_model, sims
-                        )] = idx
+                        # 10% of the time use pure-random games
+                        if random.random() < 0.1:
+                            fut = executor.submit(generate_random_data)
+                            futures[fut] = "random"
+                        else:
+                            sims = scheduled_simulations(idx)
+                            fut = executor.submit(
+                                generate_self_play_data,
+                                policy_model, value_model, sims
+                            )
+                            futures[fut] = "self"
 
-                # collect
-                for future in as_completed(futures):
+                # collect and enqueue into replay buffer with origin tags
+                for future, origin in futures.items():
                     data = future.result()
                     for state, turn, policy_t, value in data:
-                        replay_buffer.push(state, turn, policy_t, value)
+                        replay_buffer.push(state, turn, policy_t, value, origin=origin)
                     pbar.update(1)
 
-                # train on new data
+                # train on newly collected data
                 for idx in range(current_game, batch_end + 1):
                     loss = train_step(policy_model, value_model, optimizer, replay_buffer)
                     if loss is not None:
                         loss_history.append(loss)
                         print(f"[Train] Game {idx}, Loss: {loss:.4f}")
-                        # policy entropy
                         ent = compute_policy_entropy(policy_model, replay_buffer)
                         if ent is not None:
                             entropy_history.append(ent)
                             print(f"[Entropy] After Game {idx}, Entropy: {ent:.4f}")
 
-                # checkpoint / eval / plot
+                # checkpoint, eval, and plot metrics
                 if batch_end % CHECKPOINT_INTERVAL == 0 or batch_end == NUM_SELF_PLAY_GAMES:
                     save_checkpoint(policy_model, value_model, batch_end, args.output_dir)
-                    # persist logs
                     save_json(loss_history, loss_path)
                     save_json(eval_history, eval_path)
                     save_json(entropy_history, entropy_path)
-                    # plots
+
                     plot_curve(loss_history, args.output_dir,
                                "loss_curve.png", "Training Steps", "Loss",
                                "Training Loss Over Time", "Loss")

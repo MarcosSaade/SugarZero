@@ -25,6 +25,11 @@ def load_model(checkpoint_dir, idx):
     policy.eval()
     return policy, value
 
+def _dummy_value(states, turns):
+    """Picklable dummy value model always returning 0.5."""
+    bsz = states.size(0)
+    return torch.full((bsz, 1), 0.5, device=DEVICE)
+
 def play_one_game(model_a, model_b, start_player):
     """
     model_a plays when game.turn == start_player,
@@ -37,7 +42,7 @@ def play_one_game(model_a, model_b, start_player):
                 game,
                 sim_count=MIN_MCTS_SIMULATIONS,
                 policy_model=model_a,
-                value_model=None,
+                value_model=_dummy_value,
                 cpuct=EXPLORATION_WEIGHT,
                 device=DEVICE
             )
@@ -46,7 +51,7 @@ def play_one_game(model_a, model_b, start_player):
                 game,
                 sim_count=MIN_MCTS_SIMULATIONS,
                 policy_model=model_b,
-                value_model=None,
+                value_model=_dummy_value,
                 cpuct=EXPLORATION_WEIGHT,
                 device=DEVICE
             )
@@ -87,7 +92,7 @@ def main():
     policy_new, value_new = load_model(args.dir, latest)
 
     for prev in idxs[:-1]:
-        print(f"\nEvaluating {latest} vs {prev} over {args.games} games...")
+        print(f"\nEvaluating {latest} vs {prev} over {args.games} games…")
         policy_old, _ = load_model(args.dir, prev)
         winrate = evaluate_pair(policy_new, policy_old, args.games, args.workers)
         print(f"  → Model {latest} win rate vs {prev}: {winrate:.2%}")

@@ -21,6 +21,7 @@ BLUE_COLORS = [(0, 20, 220), (0, 20, 190)]
 
 # MCTS Constants
 EXPLORATION_WEIGHT = 1.4  # UCB1 exploration parameter
+MIN_MCTS_SIMULATIONS = 200  # Minimum number of simulations for MCTS
 
 # Dirichlet‐noise parameters (for root)
 DIRICHLET_ALPHA = 0.8 # inversely proportional to the number of moves, as seen in the AlphaZero paper
