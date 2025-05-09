@@ -4,7 +4,7 @@ __pycache__/
 
 /tests/__venv__/
 /checkpoints/
-/old_MLP_checkpoints/
+/old_checkpoints/
 
 notes.md
 next_steps.md
