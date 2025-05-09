@@ -34,8 +34,8 @@ torch.set_num_interop_threads(1)
 NUM_SELF_PLAY_GAMES      = 5000
 UCT_WARMUP_GAMES         = 400     
 UCT_SIMULATIONS          = 200
-MCTS_SIMULATIONS         = 600
-MIN_MCTS_SIMULATIONS     = 200
+MCTS_SIMULATIONS         = 800
+MIN_MCTS_SIMULATIONS     = 400
 BATCH_SIZE               = 64
 REPLAY_BUFFER_CAPACITY   = 10000
 LEARNING_RATE            = 1e-3
@@ -72,7 +72,8 @@ def scheduled_simulations(game_idx: int) -> int:
 def generate_random_data():
     """
     Pure random-play games to seed buffer.
-    Returns list of (state, turn, policy_tensor, value, origin).
+    Returns list of (state, turn, policy_tensor, value).
+    Draws (no winner after MAX_MOVES) are skipped entirely.
     """
     game = GameState()
     history = []
@@ -83,20 +84,28 @@ def generate_random_data():
         history.append((board_tensor, float(turn), move))
         game.make_move(*move)
 
-    winner = game.winner if game.game_over else None
+    winner = game.winner  # None if MAX_MOVES reached => “draw”
+    if winner is None:
+        return []
+
     data = []
     for state_tensor, turn, move in history:
-        val = 0.5 if winner is None else (1.0 if winner == turn else 0.0)
+        val = 1.0 if winner == turn else 0.0
         policy_tensor = torch.zeros(81, dtype=torch.float32)
-        if move is not None:
-            policy_tensor[move[0]*9 + move[1]] = 1.0
+        policy_tensor[move[0] * 9 + move[1]] = 1.0
         data.append((torch.from_numpy(state_tensor), turn, policy_tensor, val))
     return data
 
 
 def generate_self_play_data(policy_model, value_model, sim_count: int):
+    """
+    Neural-guided self-play via PUCT search with policy+value nets.
+    Returns list of (state, turn, policy_tensor, value).
+    Draws (no winner after MAX_MOVES) are skipped entirely.
+    """
     game = GameState()
     history = []
+
     while not game.game_over and game.move_count < MAX_MOVES:
         move, policy_dist = puct_search_with_policy(
             game,
@@ -113,10 +122,13 @@ def generate_self_play_data(policy_model, value_model, sim_count: int):
         history.append((board_tensor, float(turn), policy_dist))
         game.make_move(*move)
 
-    winner = game.winner if game.game_over else None
+    winner = game.winner  # None if MAX_MOVES reached => “draw”
+    if winner is None:
+        return []
+
     data = []
     for state_tensor, turn, policy_dict in history:
-        value = 0.5 if winner is None else (1.0 if winner == turn else 0.0)
+        value = 1.0 if winner == turn else 0.0
         policy_tensor = torch.zeros(81, dtype=torch.float32)
         for (s, e), p in policy_dict.items():
             policy_tensor[s * 9 + e] = p
@@ -125,6 +137,10 @@ def generate_self_play_data(policy_model, value_model, sim_count: int):
 
 
 def generate_uct_data(sim_count: int):
+    """
+    Pure UCT self-play (no network priors). Returns list of
+    (state, turn, policy_tensor, value). Draws are skipped.
+    """
     game = GameState()
     history = []
 
@@ -145,10 +161,13 @@ def generate_uct_data(sim_count: int):
         history.append((board_tensor, float(turn), move))
         game.make_move(*move)
 
-    winner = game.winner if game.game_over else None
+    winner = game.winner  # None if MAX_MOVES reached => “draw”
+    if winner is None:
+        return []
+
     data = []
     for state_tensor, turn, move in history:
-        value = 0.5 if winner is None else (1.0 if winner == turn else 0.0)
+        value = 1.0 if winner == turn else 0.0
         policy_tensor = torch.zeros(81, dtype=torch.float32)
         policy_tensor[move[0] * 9 + move[1]] = 1.0
         data.append((torch.from_numpy(state_tensor), turn, policy_tensor, value))

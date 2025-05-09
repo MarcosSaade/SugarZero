@@ -25,12 +25,12 @@ MIN_MCTS_SIMULATIONS = 200  # Minimum number of simulations for MCTS
 
 # Dirichlet‐noise parameters (for root)
 DIRICHLET_ALPHA = 0.8 # inversely proportional to the number of moves, as seen in the AlphaZero paper
-NOISE_EPSILON   = 0.25
+NOISE_EPSILON   = 0.1
 
 # Sampling temperature (self-play)
 # During the first N moves, sample with this temperature; afterwards, use greedy.
-TEMP_MOVES_THRESHOLD = 10
-TEMPERATURE           = 1.0
+TEMP_MOVES_THRESHOLD = 3
+TEMPERATURE           = 0.7
 
 # AI difficulty settings
 SIMULATION_COUNTS = {
