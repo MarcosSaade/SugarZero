@@ -31,11 +31,11 @@ torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
 
 # Hyperparameters
-NUM_SELF_PLAY_GAMES      = 5000
+NUM_SELF_PLAY_GAMES      = 10000
 UCT_WARMUP_GAMES         = 400     
 UCT_SIMULATIONS          = 200
 MCTS_SIMULATIONS         = 800
-MIN_MCTS_SIMULATIONS     = 400
+MIN_MCTS_SIMULATIONS     = 800
 BATCH_SIZE               = 64
 REPLAY_BUFFER_CAPACITY   = 10000
 LEARNING_RATE            = 1e-3
@@ -354,12 +354,18 @@ def main():
                             )
                             futures[fut] = "self"
 
-                # collect and enqueue into replay buffer with origin tags
+                # collect and enqueue into replay buffer with origin tags,
+                # oversampling winners (value == 1.0)
                 for future, origin in futures.items():
                     data = future.result()
                     for state, turn, policy_t, value in data:
+                        # push once for everyone
                         replay_buffer.push(state, turn, policy_t, value, origin=origin)
+                        # if this transition belonged to the eventual winner, push again
+                        if value == 1.0:
+                            replay_buffer.push(state, turn, policy_t, value, origin=origin)
                     pbar.update(1)
+
 
                 # train on newly collected data
                 for idx in range(current_game, batch_end + 1):

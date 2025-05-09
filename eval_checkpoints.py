@@ -7,6 +7,8 @@ import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import torch
+import matplotlib.pyplot as plt
+
 from mcts import puct_search_with_policy
 from policy_net import PolicyNet
 from value_net import ValueNet
@@ -61,7 +63,6 @@ def play_one_game(model_a, model_b, start_player):
             )
         game.make_move(*move)
 
-    # determine outcome
     if game.winner is None:
         return 0
     elif game.winner == start_player:
@@ -70,10 +71,7 @@ def play_one_game(model_a, model_b, start_player):
         return -1
 
 def evaluate_pair(model_a, model_b, games, workers):
-    wins = 0
-    losses = 0
-    draws = 0
-
+    wins = losses = draws = 0
     with ThreadPoolExecutor(max_workers=workers) as exec:
         futures = [exec.submit(play_one_game, model_a, model_b, i % 2)
                    for i in range(games)]
@@ -85,24 +83,19 @@ def evaluate_pair(model_a, model_b, games, workers):
                 losses += 1
             else:
                 draws += 1
-
     return wins, losses, draws
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate latest model vs previous checkpoints")
-    parser.add_argument("--dir",   type=str, required=True,
-                        help="Checkpoint directory")
-    parser.add_argument("--games", type=int, default=25,
-                        help="Number of games per pair")
-    parser.add_argument("--workers", type=int, default=os.cpu_count(),
-                        help="Parallel workers")
+    parser.add_argument("--dir",   type=str, required=True, help="Checkpoint directory")
+    parser.add_argument("--games", type=int, default=25, help="Number of games per pair")
+    parser.add_argument("--workers", type=int, default=os.cpu_count(), help="Parallel workers")
     args = parser.parse_args()
 
-    # find all checkpoint indices
+    # find checkpoint indices
     files = os.listdir(args.dir)
     pattern = re.compile(r'policy_model_(\d+)\.pt')
-    idxs = sorted(int(m.group(1)) for f in files
-                  if (m := pattern.match(f)))
+    idxs = sorted(int(m.group(1)) for f in files if (m := pattern.match(f)))
     if len(idxs) < 2:
         print("Need at least two checkpoints to compare.")
         return
@@ -111,15 +104,38 @@ def main():
     print(f"Latest checkpoint: {latest}")
     policy_new, _ = load_model(args.dir, latest)
 
+    # store results for plotting
+    results = []
+
     for prev in idxs[:-1]:
         print(f"\nEvaluating {latest} vs {prev} over {args.games} games…")
         policy_old, _ = load_model(args.dir, prev)
         wins, losses, draws = evaluate_pair(policy_new, policy_old, args.games, args.workers)
-
         total = wins + losses + draws
-        print(f"  Wins:   {wins}/{total} ({wins/total:.2%})")
-        print(f"  Losses: {losses}/{total} ({losses/total:.2%})")
-        print(f"  Draws:  {draws}/{total} ({draws/total:.2%})")
+
+        win_pct = wins / total * 100
+        loss_pct = losses / total * 100
+        draw_pct = draws / total * 100
+
+        print(f"  Wins:   {wins}/{total} ({win_pct:.2f}%)")
+        print(f"  Losses: {losses}/{total} ({loss_pct:.2f}%)")
+        print(f"  Draws:  {draws}/{total} ({draw_pct:.2f}%)")
+
+        results.append((prev, win_pct, loss_pct, draw_pct))
+
+    # Plot win/loss/draw rates vs checkpoint
+    checkpoints, win_rates, loss_rates, draw_rates = zip(*results)
+    plt.figure()
+    plt.plot(checkpoints, win_rates, marker='o', label='Win %')
+    plt.plot(checkpoints, draw_rates, marker='o', label='Draw %')
+    plt.plot(checkpoints, loss_rates, marker='o', label='Loss %')
+    plt.xlabel('Opponent Checkpoint')
+    plt.ylabel('Percentage')
+    plt.title(f'Model {latest} vs Previous Checkpoints')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
 
 if __name__ == "__main__":
     main()
