@@ -16,8 +16,8 @@ WHITE = (255, 255, 255)
 STATUS_BAR_COLOR = (30, 30, 30)
 
 # Player colors
-RED_COLORS  = [(200, 20, 0), (170, 20, 0)]
-BLUE_COLORS = [(0, 20, 220), (0, 20, 190)]
+RED_COLORS  = [(200, 20, 0), (140, 20, 0)]
+BLUE_COLORS = [(0, 20, 220), (0, 20, 160)]
 
 # MCTS Constants
 EXPLORATION_WEIGHT = 1.4  # UCB1 exploration parameter

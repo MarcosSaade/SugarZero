@@ -37,7 +37,7 @@ UCT_SIMULATIONS          = 200
 MCTS_SIMULATIONS         = 800
 MIN_MCTS_SIMULATIONS     = 400
 BATCH_SIZE               = 64
-REPLAY_BUFFER_CAPACITY   = 10000
+REPLAY_BUFFER_CAPACITY   = 15000
 LEARNING_RATE            = 5e-4
 WEIGHT_DECAY             = 1e-4
 CHECKPOINT_INTERVAL      = 500
@@ -68,6 +68,14 @@ def scheduled_simulations(game_idx: int) -> int:
     sims = MIN_MCTS_SIMULATIONS + frac * (MCTS_SIMULATIONS - MIN_MCTS_SIMULATIONS)
     return int(sims)
 
+def annealed_temperature(game_idx: int) -> float:
+    """
+    Linearly anneal temperature from 1.0 down to 0.5 over the course of training.
+    """
+    frac = min(game_idx / NUM_SELF_PLAY_GAMES, 1.0)
+    # start at 1.0, end at 0.5
+    return 1.0 - 0.5 * frac
+
 
 def generate_random_data():
     """
@@ -97,9 +105,11 @@ def generate_random_data():
     return data
 
 
-def generate_self_play_data(policy_model, value_model, sim_count: int):
+def generate_self_play_data(policy_model, value_model, sim_count: int, game_idx: int):
     """
     Neural-guided self-play via PUCT search with policy+value nets.
+    Uses an annealed temperature for exploration in the opening moves.
+
     Returns list of (state, turn, policy_tensor, value).
     Draws (no winner after MAX_MOVES) are skipped entirely.
     """
@@ -115,8 +125,11 @@ def generate_self_play_data(policy_model, value_model, sim_count: int):
             cpuct=EXPLORATION_WEIGHT,
             device=DEVICE
         )
+
+        # apply annealed temperature only for the first few moves
         if len(history) < TEMP_MOVES_THRESHOLD:
-            move = sample_with_temperature(policy_dist, TEMPERATURE)
+            temp = annealed_temperature(game_idx)
+            move = sample_with_temperature(policy_dist, temp)
 
         board_tensor, turn = encode_board(game.board, game.turn)
         history.append((board_tensor, float(turn), policy_dist))
@@ -133,6 +146,7 @@ def generate_self_play_data(policy_model, value_model, sim_count: int):
         for (s, e), p in policy_dict.items():
             policy_tensor[s * 9 + e] = p
         data.append((torch.from_numpy(state_tensor), turn, policy_tensor, value))
+
     return data
 
 
@@ -342,15 +356,15 @@ def main():
                         fut = executor.submit(generate_uct_data, UCT_SIMULATIONS)
                         futures[fut] = "uct"
                     else:
-                        # 10% of the time use pure-random games
                         if random.random() < 0.1:
                             fut = executor.submit(generate_random_data)
                             futures[fut] = "random"
                         else:
                             sims = scheduled_simulations(idx)
+                            # pass game index for annealed temperature
                             fut = executor.submit(
                                 generate_self_play_data,
-                                policy_model, value_model, sims
+                                policy_model, value_model, sims, idx
                             )
                             futures[fut] = "self"
 
@@ -359,13 +373,10 @@ def main():
                 for future, origin in futures.items():
                     data = future.result()
                     for state, turn, policy_t, value in data:
-                        # push once for everyone
                         replay_buffer.push(state, turn, policy_t, value, origin=origin)
-                        # if this transition belonged to the eventual winner, push again
                         if value == 1.0:
                             replay_buffer.push(state, turn, policy_t, value, origin=origin)
                     pbar.update(1)
-
 
                 # train on newly collected data
                 for idx in range(current_game, batch_end + 1):
@@ -411,10 +422,10 @@ def main():
         plot_curve(loss_history, args.output_dir,
                    "loss_curve.png", "Training Steps", "Loss",
                    "Training Loss Over Time", "Loss")
-        plot_curve(eval_history, args.output-dir,
+        plot_curve(eval_history, args.output_dir,
                    "winrate_curve.png", "Eval (x500 games)", "Win Rate",
                    "Win Rate Over Time vs Random", "WinRate")
-        plot_curve(entropy_history, args.output-dir,
+        plot_curve(entropy_history, args.output_dir,
                    "entropy_curve.png", "Training Steps", "Policy Entropy",
                    "Policy Entropy Over Time", "Entropy")
         pbar.close()
