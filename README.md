@@ -1,58 +1,82 @@
 # SugarZero
 
-**SugarZero** is a reinforcement learning playground for the table game *Sugar*, which I'm actively developing.  
-It was motivated both by a desire to understand how AlphaZero works, and by my wish to create a strong opponent to play against.
+**SugarZero** is an AlphaZero-inspired reinforcement learning AI for the abstract strategy game *Sugar*. It combines neural networks with Monte Carlo Tree Search to learn optimal play through self-competition, without human knowledge or heuristics.
+
+This project was motivated by my fascination with AlphaZero's approach and my desire to truly understand how it works by building a simplified version that could run on consumer hardware.
+
+![Screenshot from 2025-05-10 07-31-14](https://github.com/user-attachments/assets/4bdc27d0-71ad-4044-8e00-e7db6911a74d)
+---
+
+## The Game: Sugar
+
+*Sugar* is a compact abstract strategy game played on a 3×3 board:
+
+- Players control 6 stackable pieces, initially placed on their back rank
+- On each turn, a player moves one piece from the top of a stack to an adjacent square (horizontally, vertically, or diagonally)
+- A piece can only move to a square if the destination stack is shorter than or equal in height to the stack it's moving from
+- For the first three moves, each player must make at least one "forward" move (toward the opponent's side)
+- The game ends when a player cannot make any legal moves, and that player loses
+
+> **About the Name**: I originally invented and played the game using sugar packets at restaurant tables with friends, hence the name "Sugar".
 
 ---
 
-### How *Sugar* Works
-Players control stacks of pieces across a 3×3 board.  
-Each turn, a player moves a piece from one square to an adjacent square. Movement is constrained by stack heights — you can only move onto a shorter or equal stack.  
-Additionally, during the opening moves, players must include at least one forward movement.  
-The goal is to leave your opponent without any valid moves.
+## Technical Features
+
+### Core Architecture
+- **Neural Networks**: Combined policy (move selection) and value (position evaluation) networks
+- **Monte Carlo Tree Search**: Enhanced with PUCT
+- **Self-Play Training**: AI improves by generating its own training data through self-competition
+- **Parallel Processing**: Multithreaded game simulation using Python's `concurrent.futures`
+
+### Training Enhancements
+- **Dirichlet Noise**: Added to MCTS root node to encourage exploration (α=0.8)
+- **Temperature Sampling**: Controls move diversity through training (T=1.0 → 0.5)
+- **Draw Filtering**: Prevents learning from cycles by discarding excessively long games
+- **Winner Oversampling**: Prioritizes learning from decisive victories
+- **Replay Buffer**: Stores and samples 15,000 game positions for efficient training
+
+### User Interface
+- **Interactive Gameplay**: Human vs. AI matches with adjustable difficulty
+---
+
+## Key Components
+
+- `game_state.py` — Efficient board representation and rules implementation
+- `mcts.py` — Monte Carlo Tree Search with PUCT exploration
+- `neural_net.py` — CNN for combined policy and value predictions
+- `replay_buffer.py` — Storage and sampling of training examples
+- `train.py` — Self-play generation and network training
+- `game.py` — Pygame UI for human play against the AI
 
 ---
 
-### About the Name
-*Sugar* is named after how I originally invented and played the game — using sugar packets at restaurant tables with friends.
+## Getting Started
 
----
+### Requirements
+```
+python >= 3.8
+pytorch >= 1.7.0
+numpy
+pygame
+```
 
-### Features
-- Custom Monte Carlo Tree Search (MCTS) implementation with PUCT (policy and value guidance).
-- Simple policy and value neural networks.
-- Playable graphical interface built with Pygame.
-- Fast MCTS simulations using threading for parallelism.
-- Human vs. AI gameplay with adjustable difficulty.
-- Self-play data generation for training.
-- Board encoding for neural network input.
-- Value network estimating win probabilities from board positions.
-- Policy network predicting promising moves.
-- Periodic checkpoint saving during training.
+### Installation
+```bash
+git clone https://github.com/MarcosSaade/SugarZero.git
+cd SugarZero
+pip install -r requirements.txt
+```
 
----
-
-### Recent Additions
-- Parallelized self-play for faster training.
-- Batch evaluation of board states to improve neural network efficiency.
-- Replay buffer for sampling training batches.
-- Support for loading and resuming from model checkpoints.
-
----
-
-### Main Files
-- `game.py` — Pygame interface and game logic.
-- `game_state.py` — Lightweight board representation and rules.
-- `mcts.py` — MCTS agent with PUCT exploration and network guidance.
-- `policy_net.py` — Feedforward neural network predicting moves.
-- `value_net.py` — Feedforward neural network estimating outcomes.
-- `train.py` — Self-play training loop.
-- `replay_buffer.py` — Storage and sampling of training examples.
-- `utils.py`, `constants.py` — Utility functions and configuration settings.
-
----
-
-### How to Run
+### Running the Game
 ```bash
 python main.py
 ```
+
+### Controls
+- **R**: Restart game
+- **Q**: Quit
+- **A**: Toggle AI on/off
+- **S**: Swap which side the AI plays
+- **D**: Cycle AI difficulty (Easy → Medium → Hard)
+
