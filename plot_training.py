@@ -37,6 +37,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("log")
     ap.add_argument("--baseline", help="JSON eval record of the untrained network")
+    ap.add_argument("--subtitle", default="", help="note printed above the panels")
     ap.add_argument("--out", default="docs/training_curves.png")
     args = ap.parse_args()
     rows = [json.loads(l) for l in open(args.log)]
@@ -71,7 +72,11 @@ def main():
     for ax, loc in zip(axes, ["upper right", "lower left", "lower left"]):
         ax.set_xlabel("self-play games", color=TEXT_MUTED)
         ax.legend(frameon=False, fontsize=9, labelcolor=TEXT, loc=loc)
-    fig.tight_layout()
+    if args.subtitle:
+        fig.text(0.005, 0.985, args.subtitle, ha="left", va="top", fontsize=10, color=TEXT_MUTED)
+        fig.tight_layout(rect=(0, 0, 1, 0.94))
+    else:
+        fig.tight_layout()
     fig.savefig(args.out, dpi=160, facecolor=SURFACE)
 
 

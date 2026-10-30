@@ -21,6 +21,13 @@ The starting position is a theoretical draw, so a draw is the best possible resu
 perfect player. The current agent plays a losing move only 0.6% of the time in those matches. Each
 one costs the game, because the perfect player never lets a mistake go.
 
+This was a deliberately short run: 10 rounds of 320 self-play games, enough to show that the fixed
+pipeline learns, then stopped. The curves are still moving when it ends: the policy loss is still
+falling, and draws against the perfect player and raw-policy accuracy are still rising. Search
+accuracy reached 92% early, and the value head (57% correct) is the clearest place left to improve.
+With an exact solution already known, training to convergence would only confirm a number the
+solver gives directly.
+
 ## The game
 
 Sugar is played on a 3x3 board. Each player starts with 6 pieces stacked two high on their back row.
