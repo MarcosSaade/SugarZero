@@ -1,0 +1,1 @@
+{"iter": -1, "games": 0, "value_acc": 0.38393162393162394, "policy_opt": 0.44, "mcts_opt": 0.356, "vs_perfect_W": 0, "vs_perfect_D": 0, "vs_perfect_L": 40, "vs_perfect_blunder_rate": 0.11799410029498525}

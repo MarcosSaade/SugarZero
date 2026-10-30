@@ -100,7 +100,7 @@ def from_stacks(stacks_, turn, mc=6, fwd=3):
     for i, pieces in enumerate(stacks_):
         c = 1 << len(pieces)
         for lvl, p in enumerate(pieces):
-            c |= p << lvl
+            c |= int(p) << lvl  # int() so numpy inputs cannot overflow at bit 63
         code |= c << (7 * i)
     return (code, mc, fwd)
 

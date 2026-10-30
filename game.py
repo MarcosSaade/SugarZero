@@ -13,7 +13,7 @@ import torch
 import sugar
 from constants import (FPS, WIDTH, HEIGHT, TILE_SIZE, STATUS_BAR_HEIGHT, GRAY_1, GRAY_2, BLACK,
                        WHITE, STATUS_BAR_COLOR, SELECTED_COLOR, LAST_MOVE_COLOR, RED_COLORS,
-                       BLUE_COLORS, SIMULATION_COUNTS, DIFFICULTIES, MODEL_PATH)
+                       BLUE_COLORS, SIMULATION_COUNTS, DIFFICULTIES, PERFECT, MODEL_PATH)
 from mcts import search
 from network import SugarNet, MAX_PLIES
 
@@ -40,6 +40,7 @@ class Game:
         self.net = load_agent() if os.path.exists(MODEL_PATH) else None
         if self.net is None:
             print(f"No model at {MODEL_PATH}; AI disabled.")
+        self.oracle = None  # loaded on first use of the Perfect difficulty (about 20 s, 1 GB)
         self.ai_enabled = ai_enabled and self.net is not None
         self.ai_player = RED
         self.difficulty = "Medium"
@@ -114,7 +115,9 @@ class Game:
             label = self.small_font.render(f"AI: {self.difficulty}", True, WHITE)
             self.screen.blit(label, (WIDTH - 10 - label.get_width(), bar_top + 10))
             if self.search_pos == self.pos:
-                label = self.small_font.render("AI is thinking...", True, WHITE)
+                busy = "Loading perfect player..." if self.difficulty == PERFECT and self.oracle is None \
+                    else "AI is thinking..."
+                label = self.small_font.render(busy, True, WHITE)
                 self.screen.blit(label, (WIDTH - 10 - label.get_width(), bar_top + 40))
 
     def draw(self):
@@ -161,9 +164,16 @@ class Game:
 
     # ---------- AI ----------
 
-    def run_search(self, pos, sims):
-        moves, visits, _ = search(self.net, [pos], sims)[0]
-        self.ai_results.append((pos, moves[int(visits.argmax())]))
+    def run_search(self, pos, difficulty):
+        if difficulty == PERFECT:
+            if self.oracle is None:
+                from oracle import Oracle
+                self.oracle = Oracle()
+            move = self.oracle.perfect_move(pos)
+        else:
+            moves, visits, _ = search(self.net, [pos], SIMULATION_COUNTS[difficulty])[0]
+            move = moves[int(visits.argmax())]
+        self.ai_results.append((pos, move))
 
     def ai_turn(self):
         # Results are keyed by position, so a search that finishes after a restart is ignored.
@@ -175,7 +185,7 @@ class Game:
             return
         if self.search_pos != self.pos:
             self.search_pos = self.pos
-            args = (self.pos, SIMULATION_COUNTS[self.difficulty])
+            args = (self.pos, self.difficulty)
             threading.Thread(target=self.run_search, args=args, daemon=True).start()
 
     def run(self):

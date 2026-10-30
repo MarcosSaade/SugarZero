@@ -1,82 +1,103 @@
 # SugarZero
 
-**SugarZero** is an AlphaZero-inspired reinforcement learning AI for the abstract strategy game *Sugar*. It combines neural networks with Monte Carlo Tree Search to learn optimal play through self-competition, without human knowledge or heuristics.
+An AlphaZero reimplementation for *Sugar*, a small board game I invented with friends, checked against
+an exact solution of the game.
 
-This project was motivated by my fascination with AlphaZero's approach and my desire to truly understand how it works by building a simplified version that could run on consumer hardware.
+Sugar has 86.8 million reachable positions, few enough to solve completely with retrograde analysis.
+That gives something most self-play projects lack: ground truth. Every move the agent makes can be
+scored as right or wrong, and the agent can be played against a perfect opponent. The solver is used
+only for evaluation. The agent learns from self-play alone, starting from the rules.
 
-![Screenshot from 2025-05-10 07-31-14](https://github.com/user-attachments/assets/4bdc27d0-71ad-4044-8e00-e7db6911a74d)
----
+![Training curves](docs/training_curves.png)
 
-## The Game: Sugar
+| Agent | Games vs perfect player (W / D / L) | Best move found (critical positions) |
+|---|---|---|
+| Untrained network + MCTS | 0 / 0 / 40 | 36% |
+| First version (2025), 10,000 self-play games | 0 / 0 / 24 | not measured; about 20% of moves lose the draw |
+| This version, 1,600 self-play games | 0 / 23 / 17 | 92% |
+| This version, 3,200 self-play games (26 min on a laptop CPU) | 0 / 25 / 15 | 92% |
 
-*Sugar* is a compact abstract strategy game played on a 3×3 board:
+The starting position is a theoretical draw, so a draw is the best possible result against the
+perfect player. The current agent plays a losing move only 0.6% of the time in those matches. Each
+one costs the game, because the perfect player never lets a mistake go.
 
-- Players control 6 stackable pieces, initially placed on their back rank
-- On each turn, a player moves one piece from the top of a stack to an adjacent square (horizontally, vertically, or diagonally)
-- A piece can only move to a square if the destination stack is shorter than or equal in height to the stack it's moving from
-- For the first three moves, each player must make at least one "forward" move (toward the opponent's side)
-- The game ends when a player cannot make any legal moves, and that player loses
+## The game
 
-> **About the Name**: I originally invented and played the game using sugar packets at restaurant tables with friends, hence the name "Sugar".
+Sugar is played on a 3x3 board. Each player starts with 6 pieces stacked two high on their back row.
 
----
+- On your turn, move the top piece of one of your stacks to an orthogonally adjacent square.
+- The destination stack must be no taller than the stack you move from, and stacks hold at most 6 pieces.
+- Each player must make at least one forward move within their first three moves.
+- A player with no legal move loses. Games reaching 200 plies (single moves by either player) are
+  scored as draws.
 
-## Technical Features
+Blue moves first. I originally played it with sugar packets on restaurant tables, hence the name.
 
-### Core Architecture
-- **Neural Networks**: Combined policy (move selection) and value (position evaluation) networks
-- **Monte Carlo Tree Search**: Enhanced with PUCT
-- **Self-Play Training**: AI improves by generating its own training data through self-competition
-- **Parallel Processing**: Multithreaded game simulation using Python's `concurrent.futures`
+## Solving the game
 
-### Training Enhancements
-- **Dirichlet Noise**: Added to MCTS root node to encourage exploration (α=0.8)
-- **Temperature Sampling**: Controls move diversity through training (T=1.0 → 0.5)
-- **Draw Filtering**: Prevents learning from cycles by discarding excessively long games
-- **Winner Oversampling**: Prioritizes learning from decisive victories
-- **Replay Buffer**: Stores and samples 15,000 game positions for efficient training
+`solver/solve.c` enumerates every position reachable from the start, then runs retrograde analysis:
+positions with no legal move are losses, a position is won if some move reaches a lost position, and
+lost if every move reaches a won one. Positions never resolved this way are draws, because neither
+side can force a result. It takes about 80 seconds and 3.5 GB of RAM on a laptop. The opening
+forward-move rule only affects the first few moves, so `oracle.py` handles it with a small search on
+top of the table.
 
-### User Interface
-- **Interactive Gameplay**: Human vs. AI matches with adjustable difficulty
----
+What the solution says:
 
-## Key Components
+- **The start is a draw.** Of Blue's seven possible first moves, the three forward moves all lose
+  (7 to 4 loses in 20 plies, the other two in 36). Only the sideways moves keep the draw.
+- **Position values:** 42.8% of positions are wins for the side to move, 28.4% losses, 28.8% draws.
+- **Longest forced win:** 127 plies.
 
-- `game_state.py` — Efficient board representation and rules implementation
-- `mcts.py` — Monte Carlo Tree Search with PUCT exploration
-- `neural_net.py` — CNN for combined policy and value predictions
-- `replay_buffer.py` — Storage and sampling of training examples
-- `train.py` — Self-play generation and network training
-- `game.py` — Pygame UI for human play against the AI
+## Why the first version plateaued
 
----
+The first version (2025) trained for 10,000 games, plateaued, and lost every game against the perfect
+player. At the time I put this down to the game itself: pieces are never captured, so nothing forces
+games toward a result. The solver showed that the real causes were bugs in the training code:
 
-## Getting Started
+- **MCTS backup sign error.** Values were credited to the wrong player at every other depth, so
+  half the search was optimising for the opponent.
+- **Terminal positions were scored by the value network** instead of by the actual result.
+- **Drawn games were discarded.** With good play the game is a draw, so the network only ever
+  learned from games where someone blundered.
+- **Winners were duplicated in the replay buffer,** which pushed every value estimate upward.
+- **An off-by-one in the opening rule** gave Blue four moves to make its forward move instead of three.
 
-### Requirements
-```
-python >= 3.8
-pytorch >= 1.7.0
-numpy
-pygame
-```
+## How this version works
 
-### Installation
+- `sugar.py`: the rules on a 64-bit integer encoding (9 stacks x 7 bits plus the side to move).
+- `network.py`: a residual CNN (4 blocks, 64 channels, 0.3M parameters). The board is always shown
+  from the side to move's point of view. It has a policy head over 36 actions (from-square x
+  direction) and a win/draw/loss value head.
+- `mcts.py`: PUCT search with negamax backup, exact terminal values, first-play urgency, and root
+  Dirichlet noise. Many games are searched together so the network evaluates leaves in batches.
+- `train.py`: parallel self-play workers. Draws are kept as training targets, positions are
+  augmented with their left-right mirror, and a quarter of games start after a short random
+  opening for variety.
+- `evaluate.py`: scores the network against the exact solution, using positions where the choice of
+  move changes the result, and plays matches against the perfect player.
+
+## Usage
+
 ```bash
-git clone https://github.com/MarcosSaade/SugarZero.git
-cd SugarZero
 pip install -r requirements.txt
-```
 
-### Running the Game
-```bash
+# Play against the trained agent (D cycles Easy / Medium / Hard / Perfect)
 python main.py
+
+# Solve the game (needed for evaluation, Perfect mode and tests/test_oracle.py)
+gcc -O2 -o solver/solve solver/solve.c && ./solver/solve solver/solution.bin
+python evaluate.py --build                        # oracle-labelled test set
+python evaluate.py --ckpt models/sugarzero.pt     # accuracy + matches vs perfect play
+
+# Train from scratch and plot the curves
+python train.py --out runs/run1
+python plot_training.py runs/run1/log.jsonl
+
+pytest tests
 ```
 
-### Controls
-- **R**: Restart game
-- **Q**: Quit
-- **A**: Toggle AI on/off
-- **S**: Swap which side the AI plays
-- **D**: Cycle AI difficulty (Easy → Medium → Hard)
+UI controls: R restart, Q quit, A toggle AI, S swap AI side, D cycle difficulty.
 
+The run behind the figure is recorded in `docs/training_log.jsonl` and `docs/training_config.json`,
+and the evaluated network is `models/sugarzero.pt`.

@@ -1,0 +1,21 @@
+{
+  "out": "runs/local1",
+  "iters": 300,
+  "workers": 10,
+  "games_per_worker": 32,
+  "sims": 100,
+  "buffer": 400000,
+  "batch": 512,
+  "replay_ratio": 4.0,
+  "lr": 0.002,
+  "channels": 64,
+  "blocks": 4,
+  "random_start_frac": 0.25,
+  "random_start_max": 30,
+  "temp_plies": 12,
+  "temperature": 1.0,
+  "eval_every": 5,
+  "eval_games": 40,
+  "resume": false,
+  "seed": 0
+}

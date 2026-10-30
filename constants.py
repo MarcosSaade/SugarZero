@@ -19,12 +19,13 @@ LAST_MOVE_COLOR = (255, 200, 0)
 RED_COLORS = [(200, 20, 0), (140, 20, 0)]
 BLUE_COLORS = [(0, 20, 220), (0, 20, 160)]
 
-# MCTS simulations per AI move.
+# MCTS simulations per AI move. "Perfect" plays from the exact solution instead.
 SIMULATION_COUNTS = {
     "Easy": 25,
     "Medium": 200,
     "Hard": 800,
 }
-DIFFICULTIES = list(SIMULATION_COUNTS)
+PERFECT = "Perfect"
+DIFFICULTIES = list(SIMULATION_COUNTS) + [PERFECT]
 
 MODEL_PATH = "models/sugarzero.pt"
