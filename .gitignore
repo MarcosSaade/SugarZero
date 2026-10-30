@@ -7,3 +7,8 @@ __pycache__/
 notes.md
 next_steps.md
 
+solver/solve
+solver/solution.bin
+.venv/
+solver/testset.npz
+runs/

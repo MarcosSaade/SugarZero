@@ -1,191 +1,124 @@
 # mcts.py
+#
+# AlphaZero PUCT search, run on many independent roots at once so leaf evaluations are batched.
+# Values are always from the perspective of the side to move at a node (negamax backup).
+# Terminal positions use the true result (no legal moves = loss, ply cap = draw), never the net.
 
 import math
-import random
-import torch
+import numpy as np
 
-from constants import EXPLORATION_WEIGHT, DIRICHLET_ALPHA, NOISE_EPSILON
-from game_state import GameState
-from utils import encode_board, move_to_index, dirichlet_noise
+import sugar
+from network import MAX_PLIES, evaluate_batch
 
-# Number of leaf evaluations to batch together
-EVAL_BATCH_SIZE = 16
+C_PUCT = 1.5
+FPU_REDUCTION = 0.25
+DIRICHLET_ALPHA = 0.5
+NOISE_EPS = 0.25
 
-class PUCTNode:
-    def __init__(
-        self,
-        game_state: GameState,
-        parent=None,
-        move=None,
-        prior: float = 1.0,
-        policy_model=None,
-        device: str = 'cpu'
-    ):
-        self.game_state    = game_state
-        self.parent        = parent
-        self.move          = move
-        self.prior         = prior
-        self.W             = 0.0
-        self.N             = 0
-        self.children      = {}               # move → PUCTNode
-        self.untried_moves = game_state.get_valid_moves()
-        self.policy_model  = policy_model
-        self.device        = device
-        self._init_priors()
 
-    def _init_priors(self):
-        # if no policy guidance, leave empty
-        if not self.untried_moves or self.policy_model is None:
-            self.priors = {}
-            return
+def terminal_value(pos):
+    if not sugar.legal_moves(pos):
+        return -1.0
+    if pos[1] >= MAX_PLIES:
+        return 0.0
+    return None
 
-        tensor, turn = encode_board(self.game_state.board, self.game_state.turn)
-        b = torch.from_numpy(tensor).unsqueeze(0).to(self.device)
-        t = torch.tensor([turn], dtype=torch.float32, device=self.device)
-        with torch.no_grad():
-            probs = self.policy_model(b, t).squeeze(0).cpu().numpy()
 
-        self.priors = {
-            move: float(probs[move_to_index(move)])
-            for move in self.untried_moves
-        }
+class Node:
+    __slots__ = ("pos", "moves", "P", "N", "W", "children", "terminal", "n_total", "v_sum")
 
-    def select_child(self, cpuct: float):
-        total_N = sum(child.N for child in self.children.values()) or 1
+    def __init__(self, pos):
+        self.pos = pos
+        self.terminal = terminal_value(pos)
+        self.moves = None
+        self.P = None
+        self.N = None
+        self.W = None
+        self.children = None
+        self.n_total = 0
+        self.v_sum = 0.0
 
-        def score(child: 'PUCTNode'):
-            Q = child.W / child.N if child.N > 0 else 0.0
-            U = cpuct * child.prior * math.sqrt(total_N) / (1 + child.N)
-            return Q + U
+    def expand(self, priors):
+        self.moves = sugar.legal_moves(self.pos)
+        self.P = list(priors)
+        k = len(self.moves)
+        self.N = [0] * k
+        self.W = [0.0] * k
+        self.children = [None] * k
 
-        return max(self.children.values(), key=score)
+    def select(self):
+        sqrt_n = math.sqrt(self.n_total + 1)
+        # first-play urgency: unvisited children assumed a bit worse than the parent's mean value
+        seen = sum(p for p, n in zip(self.P, self.N) if n)
+        parent_q = self.v_sum / self.n_total if self.n_total else 0.0
+        fpu = parent_q - FPU_REDUCTION * math.sqrt(seen)
+        best, best_i = -1e9, 0
+        for i in range(len(self.moves)):
+            n = self.N[i]
+            q = self.W[i] / n if n else fpu
+            s = q + C_PUCT * self.P[i] * sqrt_n / (1 + n)
+            if s > best:
+                best, best_i = s, i
+        return best_i
 
-    def expand(self, move: tuple[int, int]) -> 'PUCTNode':
-        prior = self.priors.get(move, 0.0)
-        child_state = self.game_state.clone()
-        child_state.make_move(*move)
-        child = PUCTNode(
-            child_state,
-            parent=self,
-            move=move,
-            prior=prior,
-            policy_model=self.policy_model,
-            device=self.device
-        )
-        self.untried_moves.remove(move)
-        self.children[move] = child
-        return child
 
-def _evaluate_and_backprop(nodes, root_player, value_model, device):
-    tensors, turns = [], []
-    for node in nodes:
-        tensor, turn = encode_board(node.game_state.board, node.game_state.turn)
-        tensors.append(torch.from_numpy(tensor).unsqueeze(0))
-        turns.append(turn)
+def _backup(path, v):
+    # path: list of (node, child_idx); v: value for the side to move at the leaf
+    for node, i in reversed(path):
+        v = -v
+        node.N[i] += 1
+        node.W[i] += v
+        node.n_total += 1
+        node.v_sum += v
 
-    batch_states = torch.cat(tensors).to(device)
-    batch_turns  = torch.tensor(turns, dtype=torch.float32, device=device)
-    with torch.no_grad():
-        v_batch = value_model(batch_states, batch_turns).squeeze(1).cpu().numpy()
 
-    for node, v in zip(nodes, v_batch):
-        cur = node
-        while cur is not None:
-            cur.N += 1
-            if cur.game_state.turn == root_player:
-                cur.W += v
+def _add_noise(node, rng):
+    if len(node.moves) > 1:
+        eta = rng.dirichlet([DIRICHLET_ALPHA] * len(node.moves))
+        node.P = [(1 - NOISE_EPS) * p + NOISE_EPS * e for p, e in zip(node.P, eta)]
+
+
+def search(net, positions, sims, noise=False, rng=None):
+    """
+    Run `sims` simulations from each root position (all non-terminal).
+    Returns list of (moves, visit_counts, root_value) per root.
+    """
+    rng = rng or np.random.default_rng()
+    roots = [Node(p) for p in positions]
+    priors, _ = evaluate_batch(net, positions)
+    for r, pr in zip(roots, priors):
+        r.expand(pr)
+        if noise:
+            _add_noise(r, rng)
+
+    for _ in range(sims):
+        pending = []
+        for root in roots:
+            node, path = root, []
+            while True:
+                i = node.select()
+                path.append((node, i))
+                child = node.children[i]
+                if child is None:
+                    child = Node(sugar.play(node.pos, node.moves[i]))
+                    node.children[i] = child
+                    break
+                if child.terminal is not None or child.moves is None:
+                    break
+                node = child
+            if child.terminal is not None:
+                _backup(path, child.terminal)
             else:
-                cur.W += (1 - v)
-            cur = cur.parent
+                pending.append((child, path))
+        if pending:
+            pr, vals = evaluate_batch(net, [c.pos for c, _ in pending])
+            for (child, path), p, v in zip(pending, pr, vals):
+                if child.moves is None:  # may have been reached twice this round
+                    child.expand(p)
+                _backup(path, float(v))
 
-def puct_search(
-    game_state: GameState,
-    sim_count: int,
-    policy_model,
-    value_model,
-    cpuct: float = EXPLORATION_WEIGHT,
-    device: str = 'cpu'
-) -> tuple[int, int]:
-
-    # Root node
-    root = PUCTNode(game_state.clone(), policy_model=policy_model, device=device)
-    # Inject Dirichlet noise at root priors
-    if root.priors:
-        root.priors = dirichlet_noise(root.priors, DIRICHLET_ALPHA, NOISE_EPSILON)
-
-    root_player = game_state.turn
-    eval_batch   = []
-
-    for _ in range(sim_count):
-        node = root
-
-        # SELECTION
-        while not node.untried_moves and node.children:
-            node = node.select_child(cpuct)
-
-        # EXPANSION
-        if node.untried_moves:
-            mv = random.choice(node.untried_moves)
-            node = node.expand(mv)
-
-        # COLLECT for batch eval
-        eval_batch.append(node)
-        if len(eval_batch) >= EVAL_BATCH_SIZE:
-            _evaluate_and_backprop(eval_batch, root_player, value_model, device)
-            eval_batch.clear()
-
-    # final batch
-    if eval_batch:
-        _evaluate_and_backprop(eval_batch, root_player, value_model, device)
-
-    # pick most‐visited child
-    if root.children:
-        best_move = max(root.children.items(), key=lambda item: item[1].N)[0]
-    else:
-        valid = game_state.get_valid_moves()
-        best_move = random.choice(valid) if valid else None
-
-    return best_move
-
-def puct_search_with_policy(
-    game_state: GameState,
-    sim_count: int,
-    policy_model,
-    value_model,
-    cpuct: float = EXPLORATION_WEIGHT,
-    device: str = 'cpu'
-) -> tuple[tuple[int, int] | None, dict[tuple[int, int], float]]:
-
-    root = PUCTNode(game_state.clone(), policy_model=policy_model, device=device)
-    if root.priors:
-        root.priors = dirichlet_noise(root.priors, DIRICHLET_ALPHA, NOISE_EPSILON)
-
-    root_player = game_state.turn
-    eval_batch   = []
-
-    for _ in range(sim_count):
-        node = root
-        while not node.untried_moves and node.children:
-            node = node.select_child(cpuct)
-        if node.untried_moves:
-            mv = random.choice(node.untried_moves)
-            node = node.expand(mv)
-        eval_batch.append(node)
-        if len(eval_batch) >= EVAL_BATCH_SIZE:
-            _evaluate_and_backprop(eval_batch, root_player, value_model, device)
-            eval_batch.clear()
-
-    if eval_batch:
-        _evaluate_and_backprop(eval_batch, root_player, value_model, device)
-
-    if root.children:
-        visit_counts = {m: c.N for m, c in root.children.items()}
-        total = sum(visit_counts.values()) or 1
-        policy_dist = {m: cnt/total for m, cnt in visit_counts.items()}
-        best_move = max(visit_counts.items(), key=lambda item: item[1])[0]
-    else:
-        valid = game_state.get_valid_moves()
-        best_move   = random.choice(valid) if valid else None
-        policy_dist = {m: 1/len(valid) for m in valid} if valid else {}
-
-    return best_move, policy_dist
+    out = []
+    for r in roots:
+        q = r.v_sum / r.n_total if r.n_total else 0.0
+        out.append((r.moves, np.array(r.N, dtype=np.float64), q))
+    return out
