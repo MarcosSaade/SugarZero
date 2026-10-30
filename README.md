@@ -13,9 +13,9 @@ only for evaluation. The agent learns from self-play alone, starting from the ru
 | Agent | Games vs perfect player (W / D / L) | Best move found (critical positions) |
 |---|---|---|
 | Untrained network + MCTS | 0 / 0 / 40 | 36% |
-| First version (2025), 10,000 self-play games | 0 / 0 / 24 | not measured; about 20% of moves lose the draw |
-| This version, 1,600 self-play games | 0 / 23 / 17 | 92% |
-| This version, 3,200 self-play games (26 min on a laptop CPU) | 0 / 25 / 15 | 92% |
+| Before the bug fixes below, 10,000 self-play games | 0 / 0 / 24 | not measured; about 20% of moves lose the draw |
+| Fixed pipeline, 1,600 self-play games | 0 / 23 / 17 | 92% |
+| Fixed pipeline, 3,200 self-play games (26 min on a laptop CPU) | 0 / 25 / 15 | 92% |
 
 The starting position is a theoretical draw, so a draw is the best possible result against the
 perfect player. The current agent plays a losing move only 0.6% of the time in those matches. Each
@@ -51,11 +51,12 @@ What the solution says:
 - **Position values:** 42.8% of positions are wins for the side to move, 28.4% losses, 28.8% draws.
 - **Longest forced win:** 127 plies.
 
-## Why the first version plateaued
+## Bugs the solver caught
 
-The first version (2025) trained for 10,000 games, plateaued, and lost every game against the perfect
-player. At the time I put this down to the game itself: pieces are never captured, so nothing forces
-games toward a result. The solver showed that the real causes were bugs in the training code:
+Before these fixes, training plateaued after 10,000 games and the agent lost every game against the
+perfect player. Without ground truth, that looked like a property of the game: pieces are never
+captured, so nothing forces games toward a result. Scoring moves against the solver pointed to bugs
+in the training code instead:
 
 - **MCTS backup sign error.** Values were credited to the wrong player at every other depth, so
   half the search was optimising for the opponent.
@@ -65,7 +66,7 @@ games toward a result. The solver showed that the real causes were bugs in the t
 - **Winners were duplicated in the replay buffer,** which pushed every value estimate upward.
 - **An off-by-one in the opening rule** gave Blue four moves to make its forward move instead of three.
 
-## How this version works
+## How it works
 
 - `sugar.py`: the rules on a 64-bit integer encoding (9 stacks x 7 bits plus the side to move).
 - `network.py`: a residual CNN (4 blocks, 64 channels, 0.3M parameters). The board is always shown
