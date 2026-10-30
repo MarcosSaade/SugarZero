@@ -73,8 +73,8 @@ def main():
         ax.set_xlabel("self-play games", color=TEXT_MUTED)
         ax.legend(frameon=False, fontsize=9, labelcolor=TEXT, loc=loc)
     if args.subtitle:
-        fig.text(0.005, 0.985, args.subtitle, ha="left", va="top", fontsize=10, color=TEXT_MUTED)
-        fig.tight_layout(rect=(0, 0, 1, 0.94))
+        fig.text(0.025, 0.96, args.subtitle, ha="left", va="top", fontsize=10, color=TEXT_MUTED)
+        fig.tight_layout(rect=(0, 0, 1, 0.92))
     else:
         fig.tight_layout()
     fig.savefig(args.out, dpi=160, facecolor=SURFACE)
