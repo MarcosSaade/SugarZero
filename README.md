@@ -33,6 +33,8 @@ Sugar is played on a 3x3 board. Each player starts with 6 pieces stacked two hig
 
 Blue moves first. I originally played it with sugar packets on restaurant tables, hence the name.
 
+![SugarZero game screen](https://github.com/user-attachments/assets/4bdc27d0-71ad-4044-8e00-e7db6911a74d)
+
 ## Solving the game
 
 `solver/solve.c` enumerates every position reachable from the start, then runs retrograde analysis:
