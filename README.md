@@ -13,15 +13,14 @@ only for evaluation. The agent learns from self-play alone, starting from the ru
 | Agent | Games vs perfect player (W / D / L) | Best move found (critical positions) |
 |---|---|---|
 | Untrained network + MCTS | 0 / 0 / 40 | 36% |
-| Before the bug fixes below, 10,000 self-play games | 0 / 0 / 24 | not measured; about 20% of moves lose the draw |
-| Fixed pipeline, 1,600 self-play games | 0 / 23 / 17 | 92% |
-| Fixed pipeline, 3,200 self-play games (26 min on a laptop CPU) | 0 / 25 / 15 | 92% |
+| 1,600 self-play games | 0 / 23 / 17 | 92% |
+| 3,200 self-play games (26 min on a laptop CPU) | 0 / 25 / 15 | 92% |
 
 The starting position is a theoretical draw, so a draw is the best possible result against the
 perfect player. The current agent plays a losing move only 0.6% of the time in those matches. Each
 one costs the game, because the perfect player never lets a mistake go.
 
-This was a deliberately short run: 10 rounds of 320 self-play games, enough to show that the fixed
+This was a deliberately short run: 10 rounds of 320 self-play games, enough to show that the
 pipeline learns, then stopped. The curves are still moving when it ends: the policy loss is still
 falling, and draws against the perfect player and raw-policy accuracy are still rising. Search
 accuracy reached 92% early, and the value head (57% correct) is the clearest place left to improve.
@@ -57,21 +56,6 @@ What the solution says:
   (7 to 4 loses in 20 plies, the other two in 36). Only the sideways moves keep the draw.
 - **Position values:** 42.8% of positions are wins for the side to move, 28.4% losses, 28.8% draws.
 - **Longest forced win:** 127 plies.
-
-## Bugs the solver caught
-
-Before these fixes, training plateaued after 10,000 games and the agent lost every game against the
-perfect player. Without ground truth, that looked like a property of the game: pieces are never
-captured, so nothing forces games toward a result. Scoring moves against the solver pointed to bugs
-in the training code instead:
-
-- **MCTS backup sign error.** Values were credited to the wrong player at every other depth, so
-  half the search was optimising for the opponent.
-- **Terminal positions were scored by the value network** instead of by the actual result.
-- **Drawn games were discarded.** With good play the game is a draw, so the network only ever
-  learned from games where someone blundered.
-- **Winners were duplicated in the replay buffer,** which pushed every value estimate upward.
-- **An off-by-one in the opening rule** gave Blue four moves to make its forward move instead of three.
 
 ## How it works
 
